@@ -1,0 +1,51 @@
+// =============== Downsample compute shader for SSS ================
+// Adapted for URP from HDRP implementation
+
+#pragma only_renderers d3d11 playstation xboxone xboxseries vulkan metal switch
+
+#pragma kernel Downsample
+
+#pragma multi_compile _ ENABLE_MSAA
+
+//--------------------------------------------------------------------------------------------------
+// Included headers
+//--------------------------------------------------------------------------------------------------
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Random.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ArtShaders/Scene/SubsurfaceScattering/Includes/DiffusionProfileSettings.cs.hlsl"
+
+//--------------------------------------------------------------------------------------------------
+// Inputs & outputs
+//--------------------------------------------------------------------------------------------------
+
+int _SssDownsampleSteps;
+int _FrameCount;
+
+TEXTURE2D(_SourceTexture);
+RW_TEXTURE2D(float4, _OutputTexture);
+
+#define GROUP_SIZE 8
+
+//--------------------------------------------------------------------------------------------------
+// Implementation
+//--------------------------------------------------------------------------------------------------
+
+[numthreads(GROUP_SIZE, GROUP_SIZE, 1)]
+void Downsample(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    UNITY_XR_ASSIGN_VIEW_INDEX(dispatchThreadId.z);
+    
+    uint2 positionSS = dispatchThreadId.xy;
+    uint scale1d = 1u << _SssDownsampleSteps;
+
+    // Downsample will just randomly select one of the source samples
+    float rand = InterleavedGradientNoise(positionSS, _FrameCount);
+    uint index = uint(rand * scale1d * scale1d);
+
+    uint2 inputSS = (positionSS * scale1d) + uint2(index / scale1d, index % scale1d);
+
+    float4 value = LOAD_TEXTURE2D(_SourceTexture, inputSS);
+    _OutputTexture[positionSS] = value;
+}
