@@ -91,6 +91,13 @@ namespace SoulRender
         // ===== Combine Lighting Shader Properties =====
         public static readonly int _StencilRef = Shader.PropertyToID("_StencilRef");
         
+        // ===== Separable Filter =====
+        public static readonly int _SSSKernel = Shader.PropertyToID("_SSSKernel");
+        public static readonly int _SSSKernelSize = Shader.PropertyToID("_SSSKernelSize");
+        public static readonly int _SeparableInput = Shader.PropertyToID("_SeparableInput");
+        public const string SSSSeparableIntermediateName = "_SSSSeparableIntermediate";
+        public const string SSSFilteringSeparablePassName = "SSS Filtering Separable";
+
         // ===== Stencil Values =====
         public const int STENCILUSAGE_SUBSURFACE_SCATTERING = 4;
     }
