@@ -66,6 +66,14 @@ float3 LoadIrradiance(int2 coord)
 #endif
 }
 
+// Always loads from the full-resolution irradiance source.
+// Used for detail-preservation in the final (vertical) pass so we restore
+// original-resolution high-frequency detail regardless of the downsample setting.
+float3 LoadOriginalIrradiance(int2 coord)
+{
+    return LOAD_TEXTURE2D_X(_IrradianceSource, coord).rgb;
+}
+
 // Load a pixel's linear eye depth from the depth buffer.
 float LoadLinearDepth(int2 coord)
 {
@@ -89,15 +97,9 @@ void FilterSeparable(uint2 pixelCoord, bool horizontal)
     int   profileIndex = sssData.diffusionProfileIndex;
     float distScale    = sssData.subsurfaceMask;
 
-    // Per-profile parameters
-    float metersPerUnit = _WorldScalesAndFilterRadiiAndThicknessRemaps[profileIndex].x;
-    float filterRadius  = _WorldScalesAndFilterRadiiAndThicknessRemaps[profileIndex].y; // mm
-
-    // Texturing mode
-    uint   texturingMode = GetSubsurfaceScatteringTexturingMode(profileIndex);
-    float3 albedo        = ApplySubsurfaceScatteringTexturingMode(texturingMode, sssData.diffuseColor);
-
-    // Center irradiance and depth
+    // Center irradiance:
+    //   H pass  → read from the original irradiance source
+    //   V pass  → read from the horizontal-pass output (raw, no albedo)
     float3 centerIrradiance;
 #ifdef VERTICAL_PASS
     centerIrradiance = LOAD_TEXTURE2D_X(_SeparableInput, pixelCoord).rgb;
@@ -106,30 +108,41 @@ void FilterSeparable(uint2 pixelCoord, bool horizontal)
 #endif
     float centerDepth = LoadLinearDepth(pixelCoord);
 
-    // If no scattering or not an SSS pixel, output original
+    // If no scattering or not an SSS pixel:
+    //   H pass  → write raw irradiance (no albedo) so V-pass neighbours sample correctly
+    //   V pass  → write albedo-weighted result so the buffer is consistent, but the
+    //             combine lighting pass uses a stencil test to skip non-SSS pixels,
+    //             so this value is never actually blended onto the colour buffer.
     if (distScale == 0 || !TestLightingForSSS(centerIrradiance))
     {
+#ifdef VERTICAL_PASS
+        uint   texturingMode = GetSubsurfaceScatteringTexturingMode(profileIndex);
+        float3 albedo        = ApplySubsurfaceScatteringTexturingMode(texturingMode, sssData.diffuseColor);
         _CameraFilteringTexture[pixelCoord] = float4(albedo * centerIrradiance, 1.0);
+#else
+        _CameraFilteringTexture[pixelCoord] = float4(centerIrradiance, 1.0);
+#endif
         return;
     }
 
-    // Convert filter radius from mm to pixels
-    // Use the same pixel-size derivation as the disk sampler:
-    // unitsPerPixel ≈ 2 * abs(cornerPosVS.x - centerPosVS.x)
-    // For a simple approximation we compute via projection:
+    // Per-profile parameters
+    float metersPerUnit = _WorldScalesAndFilterRadiiAndThicknessRemaps[profileIndex].x;
+    float filterRadius  = _WorldScalesAndFilterRadiiAndThicknessRemaps[profileIndex].y; // mm
+
+    // Convert filter radius from mm to pixels (same derivation as the disk sampler)
     float2 screenUV    = (pixelCoord + 0.5) * _ScreenSize.zw;
     float2 posNDC      = screenUV * 2.0 - 1.0;
     float2 cornerNDC   = posNDC + 0.5 * _ScreenSize.zw;
-    float3 centerPosVS = ComputeViewSpacePosition(posNDC,   centerDepth, UNITY_MATRIX_I_P);
+    float3 centerPosVS = ComputeViewSpacePosition(posNDC,    centerDepth, UNITY_MATRIX_I_P);
     float3 cornerPosVS = ComputeViewSpacePosition(cornerNDC, centerDepth, UNITY_MATRIX_I_P);
 
-    float mmPerUnit      = MILLIMETERS_PER_METER * (metersPerUnit * rcp(distScale));
-    float unitsPerMm     = rcp(mmPerUnit);
-    float unitsPerPixel  = max(0.0001, 2.0 * abs(cornerPosVS.x - centerPosVS.x));
-    float pixelsPerMm    = rcp(unitsPerPixel) * unitsPerMm;
+    float mmPerUnit     = MILLIMETERS_PER_METER * (metersPerUnit * rcp(distScale));
+    float unitsPerMm    = rcp(mmPerUnit);
+    float unitsPerPixel = max(0.0001, 2.0 * abs(cornerPosVS.x - centerPosVS.x));
+    float pixelsPerMm   = rcp(unitsPerPixel) * unitsPerMm;
 
     // Bilateral scale: tighter => more edge preservation
-    float bilateralScale = 10.0; // tunable constant
+    float bilateralScale = 10.0;
 
     // Accumulate weighted irradiance
     float3 totalIrradiance = 0;
@@ -139,9 +152,9 @@ void FilterSeparable(uint2 pixelCoord, bool horizontal)
     {
         float4 tap    = _SSSKernel[i];
         float3 weight = tap.xyz;
-        float  t      = tap.w; // normalized offset in [-1,1]
+        float  t      = tap.w; // normalized offset in [-1, 1]
 
-        // Map normalized offset to pixels using the actual filter radius
+        // Map normalized offset to pixels using the per-pixel filter radius
         float offsetMm     = t * filterRadius;
         float offsetPixels = offsetMm * pixelsPerMm;
 
@@ -171,16 +184,31 @@ void FilterSeparable(uint2 pixelCoord, bool horizontal)
         totalWeight     += w;
     }
 
-    // Normalize
-    totalWeight     = max(totalWeight, FLT_MIN);
-    float3 blurred  = totalIrradiance / totalWeight;
+    float3 blurred = totalIrradiance / max(totalWeight, FLT_MIN);
 
-    // Detail preservation: final = blurred + (original - blurred) * preservation
-    float3 highFreq = centerIrradiance - blurred;
-    float3 final    = blurred + highFreq * _GlobalDetailPreservation;
-    final           = max(final, 0);
+#ifdef VERTICAL_PASS
+    // ── Final (vertical) pass ──────────────────────────────────────────────
+    // Apply texturing / albedo (only once, here in the final pass).
+    uint   texturingMode = GetSubsurfaceScatteringTexturingMode(profileIndex);
+    float3 albedo        = ApplySubsurfaceScatteringTexturingMode(texturingMode, sssData.diffuseColor);
+
+    // Detail preservation: compare against the ORIGINAL (unfiltered) irradiance,
+    // not the H-filtered intermediate stored in centerIrradiance / _SeparableInput.
+    // The H pass already blurred the signal, so using it as the "original" would
+    // mis-represent what high-frequency detail needs to be added back.
+    // LoadOriginalIrradiance always reads the full-resolution _IrradianceSource so
+    // that this matches the disk-sampler's behaviour even when USE_DOWNSAMPLE is set.
+    float3 originalIrradiance = LoadOriginalIrradiance(pixelCoord);
+    float3 highFreq = originalIrradiance - blurred;
+    float3 final    = max(blurred + highFreq * _GlobalDetailPreservation, 0);
 
     _CameraFilteringTexture[pixelCoord] = float4(albedo * final, 1.0);
+#else
+    // ── Horizontal pass ────────────────────────────────────────────────────
+    // Write raw blurred irradiance with NO albedo and NO detail preservation.
+    // Albedo and detail preservation are applied once in the vertical pass.
+    _CameraFilteringTexture[pixelCoord] = float4(blurred, 1.0);
+#endif
 }
 
 [numthreads(8, 8, 1)]
