@@ -19,6 +19,8 @@ namespace SoulRender
         private const float kMinFalloffThreshold = 0.05f;
         // Millimeters per meter (for converting filter radius from mm to world units)
         private const float kMillimetersPerMeter = 1000.0f;
+        // Minimum world scale to prevent division by zero in mm→world conversion
+        private const float kMinWorldScale = 0.0001f;
         // Depth falloff compensation factor.
         // The depth follow shader formula uses: depthFalloff * 10 * distToProj * |Δd|.
         // Previously distToProj was ~3x larger (due to FOV/3 approximation), so we compensate
@@ -301,7 +303,7 @@ namespace SoulRender
                         float filterRadius = m_DiffusionProfiles[i].profile.filterRadius; // In mm
                         float worldScale = m_DiffusionProfiles[i].profile.worldScale;     // meters per unit
                         // Convert filter radius from mm to world units
-                        float scatterRadiusWorld = filterRadius / (kMillimetersPerMeter * Mathf.Max(worldScale, 0.0001f));
+                        float scatterRadiusWorld = filterRadius / (kMillimetersPerMeter * Mathf.Max(worldScale, kMinWorldScale));
                         // Convert to the width parameter the shader expects
                         width = scatterRadiusWorld * (height * 0.5f) * m_SeparableWidth;
                         break;
