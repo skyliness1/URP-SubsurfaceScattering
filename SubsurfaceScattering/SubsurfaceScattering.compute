@@ -526,11 +526,11 @@ void SubsurfaceScattering(uint3 groupId          : SV_GroupID,
         // Check whether the thread group needs to perform any work.
 #ifdef SSS_HALF_RES
         // In half-res, each thread group covers 32×32 full-res pixels = 4×4 coarse stencil tiles.
+        // Use flat unrolled loop for better instruction scheduling (only runs on thread 0 once per group).
         uint HTileValue = 0;
-        [unroll] for (uint sy = 0; sy < 4; sy++)
-        [unroll] for (uint sx = 0; sx < 4; sx++)
+        [unroll] for (uint si = 0; si < 16; si++)
         {
-            uint addr = Get1DAddressFromPixelCoord(4 * groupId.xy + uint2(sx, sy), _CoarseStencilBufferSize.xy, groupId.z);
+            uint addr = Get1DAddressFromPixelCoord(4 * groupId.xy + uint2(si & 3, si >> 2), _CoarseStencilBufferSize.xy, groupId.z);
             HTileValue |= _CoarseStencilBuffer[addr];
         }
 #else
