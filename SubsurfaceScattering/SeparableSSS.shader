@@ -13,6 +13,7 @@ Shader "Hidden/SubsurfaceScattering/SeparableSSS"
     #include "Packages/com.unity.render-pipelines.universal/ArtShaders/Scene/SubsurfaceScattering/Includes/ShaderVariablesGlobalSubsurface.hlsl"
 
     #define nSamples 25
+    #define KERNEL_RANGE 3.0 // max kernel offset for nSamples=25 with RANGE=3
 
     float _SSSSDepthFalloff;
     float _DistanceToProjectionWindow;
@@ -78,9 +79,10 @@ Shader "Hidden/SubsurfaceScattering/SeparableSSS"
                 // extend far beyond screen boundaries. sampler_LinearClamp repeats edge pixels,
                 // creating visible stripe artifacts around screen edges.
                 // Cap the outermost sample to 10% of screen in UV space.
-                #define KERNEL_RANGE 3.0 // max kernel offset for nSamples=25 with RANGE=3
                 float maxStepPerUnit = 0.1 / KERNEL_RANGE; // max UV step per kernel unit
                 float stepLen = length(finalStep);
+                // Guard: only scale down when stepLen exceeds threshold; when stepLen ≤ threshold
+                // (including zero from subsurfaceMask=0), the ternary returns 1.0 avoiding division.
                 finalStep *= (stepLen > maxStepPerUnit) ? (maxStepPerUnit / stepLen) : 1.0;
 
                 float4 colorBlurred = colorM;
