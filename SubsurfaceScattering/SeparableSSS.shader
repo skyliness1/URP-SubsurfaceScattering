@@ -10,7 +10,7 @@ Shader "Hidden/SubsurfaceScattering/SeparableSSS"
     #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
     #include "Packages/com.unity.render-pipelines.universal/Shaders/PostProcessing/Common.hlsl"
 
-    #define nSamples 11
+    #define nSamples 25
 
     float _SSSSDepthFalloff;
     float _DistanceToProjectionWindow;
@@ -51,7 +51,7 @@ Shader "Hidden/SubsurfaceScattering/SeparableSSS"
             float4 frag(Varyings input) : SV_TARGET
             {
                 float2 texcoord = input.uv.xy;
-                float4 colorM = SAMPLE_TEXTURE2D_X(_MainTex, sampler_PointClamp, texcoord);
+                float4 colorM = SAMPLE_TEXTURE2D_X(_MainTex, sampler_LinearClamp, texcoord);
 
                 float dSceneDepth = SAMPLE_TEXTURE2D_X(_CameraDepthTexture, sampler_CameraDepthTexture, texcoord);
                 float depthM = LinearEyeDepth(dSceneDepth, _ZBufferParams);
@@ -65,7 +65,7 @@ Shader "Hidden/SubsurfaceScattering/SeparableSSS"
                 for (int i = 1; i < nSamples; i++)
                 {
                     float2 offset = texcoord + _Kernel[i].a * finalStep;
-                    float4 color = SAMPLE_TEXTURE2D_X(_MainTex, sampler_PointClamp, offset);
+                    float4 color = SAMPLE_TEXTURE2D_X(_MainTex, sampler_LinearClamp, offset);
 
                 #ifdef SSSS_FOLLOW_SURFACE
                     float depth = LinearEyeDepth(SAMPLE_TEXTURE2D_X(_CameraDepthTexture, sampler_CameraDepthTexture, offset), _ZBufferParams);

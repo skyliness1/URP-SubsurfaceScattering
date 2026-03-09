@@ -12,7 +12,7 @@ namespace SoulRender
     public partial class SubsurfaceScatteringPass
     {
         // 4S constants
-        private const int kSeparableSampleCount = 11;
+        private const int kSeparableSampleCount = 25;
         // Epsilon to prevent division by zero in Gaussian falloff calculation
         private const float kFalloffEpsilon = 0.001f;
         // Minimum per-channel falloff to avoid extremely narrow Gaussians that cause artifacts
@@ -110,7 +110,7 @@ namespace SoulRender
         }
 
         /// <summary>
-        /// Calculate the 11-sample separable kernel using strength and falloff parameters.
+        /// Calculate the 25-sample separable kernel using strength and falloff parameters.
         /// Adapted from Refer implementation.
         /// </summary>
         private void CalculateSeparableKernel(Vector3 strength, Vector3 falloff)
