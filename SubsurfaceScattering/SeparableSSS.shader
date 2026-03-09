@@ -22,6 +22,9 @@ Shader "Hidden/SubsurfaceScattering/SeparableSSS"
     TEXTURE2D_X(_CameraDepthTexture);
     SAMPLER(sampler_CameraDepthTexture);
 
+    // SSSBuffer: RGB = diffuseColor, A = packed(subsurfaceMask, diffusionProfileIndex)
+    TEXTURE2D(_SSSBufferTexture);
+
     #pragma target 3.0
     ENDHLSL
 
@@ -53,11 +56,20 @@ Shader "Hidden/SubsurfaceScattering/SeparableSSS"
                 float2 texcoord = input.uv.xy;
                 float4 colorM = SAMPLE_TEXTURE2D_X(_MainTex, sampler_LinearClamp, texcoord);
 
+                // Read per-pixel subsurface mask from SSSBuffer alpha channel.
+                // SSSBuffer.a = PackFloatInt8bit(subsurfaceMask, profileIndex, 16)
+                // subsurfaceMask: 0 = no SSS blur, 1 = full SSS blur
+                float4 sssBuffer = LOAD_TEXTURE2D(_SSSBufferTexture, uint2(input.positionCS.xy));
+                float subsurfaceMask;
+                uint profileIndex;
+                UnpackFloatInt8bit(sssBuffer.a, 16, subsurfaceMask, profileIndex);
+
                 float dSceneDepth = SAMPLE_TEXTURE2D_X(_CameraDepthTexture, sampler_CameraDepthTexture, texcoord);
                 float depthM = LinearEyeDepth(dSceneDepth, _ZBufferParams);
 
                 float scale = _DistanceToProjectionWindow / depthM;
-                float2 finalStep = _SSSSDirection.xy * scale * _CameraDepthTexture_TexelSize.xy;
+                // Scale blur step by subsurfaceMask so per-pixel masking controls blur radius
+                float2 finalStep = _SSSSDirection.xy * scale * _CameraDepthTexture_TexelSize.xy * subsurfaceMask;
 
                 float4 colorBlurred = colorM;
                 colorBlurred.rgb *= _Kernel[0].rgb;
