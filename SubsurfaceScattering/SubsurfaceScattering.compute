@@ -14,12 +14,19 @@
 #pragma multi_compile _ ENABLE_MSAA
 #pragma multi_compile _ USE_DOWNSAMPLE
 #pragma multi_compile _ USE_SSS_OCCLUSION
+#pragma multi_compile _ SSS_HALF_RES
 
 // TODO: use sharp load hoisting on PS4.
 
 // Tweak parameters.
 #define SSS_BILATERAL_FILTER  1
 #define SSS_USE_LDS_CACHE     1 // Use LDS as an L0 texture cache.
+// Half-res mode: disable LDS cache because the spatial extent of each thread group doubles
+// (16×16 half-res = 32×32 full-res), making the TEXTURE_CACHE_BORDER insufficient.
+#ifdef SSS_HALF_RES
+#undef SSS_USE_LDS_CACHE
+#define SSS_USE_LDS_CACHE 0
+#endif
 #define SSS_RANDOM_ROTATION   1 // Hides undersampling artifacts with high-frequency noise. TAA blurs the noise.
 #define SSS_USE_TANGENT_PLANE 0 // Improves the accuracy of the approximation(0 -> 1st order). High cost. Does not work with back-facing normals.
 #define SSS_CLAMP_ARTIFACT    0 // Reduces bleeding. Use with SSS_USE_TANGENT_PLANE.
@@ -500,6 +507,14 @@ void SubsurfaceScattering(uint3 groupId          : SV_GroupID,
     uint2 groupOffset = groupId.xy * GROUP_SIZE_1D;
     uint2 pixelCoord  = groupOffset + groupCoord;
 
+    // In half-res mode, each thread processes one half-res pixel but reads from full-res inputs.
+    // pixelCoord is in half-res space; fullResPixelCoord maps to the corresponding full-res pixel.
+#ifdef SSS_HALF_RES
+    uint2 fullResPixelCoord = pixelCoord * 2;
+#else
+    uint2 fullResPixelCoord = pixelCoord;
+#endif
+
     CacheInfo cacheInfo;
     cacheInfo.cacheOffset = (int2)groupOffset - TEXTURE_CACHE_BORDER;
     cacheInfo.cacheCoord = groupCoord + TEXTURE_CACHE_BORDER;
@@ -509,6 +524,17 @@ void SubsurfaceScattering(uint3 groupId          : SV_GroupID,
         uint stencilRef = STENCILUSAGE_SUBSURFACE_SCATTERING;
 
         // Check whether the thread group needs to perform any work.
+#ifdef SSS_HALF_RES
+        // In half-res, each thread group covers 32×32 full-res pixels = 4×4 coarse stencil tiles.
+        uint HTileValue = 0;
+        [unroll] for (uint sy = 0; sy < 4; sy++)
+        [unroll] for (uint sx = 0; sx < 4; sx++)
+        {
+            uint addr = Get1DAddressFromPixelCoord(4 * groupId.xy + uint2(sx, sy), _CoarseStencilBufferSize.xy, groupId.z);
+            HTileValue |= _CoarseStencilBuffer[addr];
+        }
+#else
+        // Full-res: each thread group covers 16×16 pixels = 2×2 coarse stencil tiles.
         uint s00Address = Get1DAddressFromPixelCoord(2 * groupId.xy + uint2(0, 0), _CoarseStencilBufferSize.xy, groupId.z);
         uint s10Address = Get1DAddressFromPixelCoord(2 * groupId.xy + uint2(1, 0), _CoarseStencilBufferSize.xy, groupId.z);
         uint s01Address = Get1DAddressFromPixelCoord(2 * groupId.xy + uint2(0, 1), _CoarseStencilBufferSize.xy, groupId.z);
@@ -520,6 +546,7 @@ void SubsurfaceScattering(uint3 groupId          : SV_GroupID,
         uint s11 = _CoarseStencilBuffer[s11Address];
 
         uint HTileValue = s00 | s10 | s01 | s11;
+#endif
         // Perform the stencil test (reject at the tile rate).
         processGroup = ((HTileValue & stencilRef) != 0);
     }
@@ -530,7 +557,7 @@ void SubsurfaceScattering(uint3 groupId          : SV_GroupID,
     if (!processGroup) { return; }
 
     CenterInfo centerInfo;
-    centerInfo.irradiance  = LOAD_TEXTURE2D_X(_IrradianceSource, pixelCoord).rgb;
+    centerInfo.irradiance  = LOAD_TEXTURE2D_X(_IrradianceSource, fullResPixelCoord).rgb;
     centerInfo.depth       = 0;
     bool   passedStencilTest = TestLightingForSSS(centerInfo.irradiance);
 
@@ -539,7 +566,7 @@ void SubsurfaceScattering(uint3 groupId          : SV_GroupID,
     if (passedStencilTest)
 #endif
     {
-        centerInfo.depth = LOAD_TEXTURE2D_X(_DepthTexture, pixelCoord).r;
+        centerInfo.depth = LOAD_TEXTURE2D_X(_DepthTexture, fullResPixelCoord).r;
     }
 
 #if SSS_USE_LDS_CACHE
@@ -605,7 +632,7 @@ void SubsurfaceScattering(uint3 groupId          : SV_GroupID,
     debugInfo = (DebugInfo)0;
 
     SssResult result;
-    EvaluateSss(pixelCoord, cacheInfo, centerInfo, debugInfo, result);
+    EvaluateSss(fullResPixelCoord, cacheInfo, centerInfo, debugInfo, result);
 
     float3 irradiance = result.irradiance;
 

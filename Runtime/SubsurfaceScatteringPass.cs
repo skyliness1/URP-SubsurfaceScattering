@@ -57,6 +57,8 @@ namespace SoulRender
         private bool m_SubsurfaceScatteringAttenuation;
         
         private float m_globalDetailPreservation;
+        
+        private bool m_HalfResSSS;
 
         public int sampleBudget
         {
@@ -81,6 +83,12 @@ namespace SoulRender
             get { return m_globalDetailPreservation; }
             set { m_globalDetailPreservation = value; }
         }
+        
+        public bool halfResSSS
+        {
+            get { return m_HalfResSSS; }
+            set { m_HalfResSSS = value; }
+        }
 
         // Combine Lighting Material
         private Material m_CombineLightingMaterial;
@@ -100,6 +108,7 @@ namespace SoulRender
             int downsampleSteps,
             bool subsurfaceScatteringAttenuation,
             float globalDetailPreservation,
+            bool halfResSSS,
             SSSMode sssMode = SSSMode.FiveS,
             Shader separableSSSShader = null,
             float separableWidth = 0.3f,
@@ -119,6 +128,7 @@ namespace SoulRender
             m_SubsurfaceScatteringAttenuation = subsurfaceScatteringAttenuation;
             
             m_globalDetailPreservation = globalDetailPreservation;
+            m_HalfResSSS = halfResSSS;
 
             // Create combine lighting material (HDRP-style)
             if (combineLightingShader != null)

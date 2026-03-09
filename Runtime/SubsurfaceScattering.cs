@@ -54,6 +54,9 @@ namespace SoulRender
             [Range(0, 1)]
             public float globalDetailPreservation = 0.5f;
 
+            [Tooltip("Run the SSS filter at half resolution for significantly better performance (approximately 4x faster filtering). Quality is slightly reduced at close range but generally acceptable for SSS.")]
+            public bool halfResSSS = false;
+
             [Tooltip("Main SSS compute shader")]
             public ComputeShader subsurfaceScatteringCS;
             
@@ -184,6 +187,7 @@ namespace SoulRender
                 settings.downsampleSteps,
                 settings.subsurfaceScatteringAttenuation,
                 settings.globalDetailPreservation,
+                settings.halfResSSS,
                 settings.sssMode,
                 settings.separableSSSShader,
                 settings.separableWidth,

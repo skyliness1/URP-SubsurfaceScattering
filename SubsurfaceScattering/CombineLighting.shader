@@ -52,7 +52,13 @@ Shader "Hidden/SubsurfaceScattering/CombineLighting"
             UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
             
             // Sample SSS filtered diffuse lighting
+        #ifdef SSS_HALF_RES
+            // Bilinear upsample from half-res filtering buffer using UV coordinates.
+            // The hardware interpolator handles the resolution mismatch automatically.
+            float3 diffuseLighting = SAMPLE_TEXTURE2D_X(_IrradianceSource, sampler_IrradianceSource, input.texcoord).rgb;
+        #else
             float3 diffuseLighting = LOAD_TEXTURE2D_X(_IrradianceSource, input.positionCS.xy).rgb;
+        #endif
             
             // Sample depth and reconstruct world position for fog calculation
             float deviceDepth = SampleSceneDepth(input.texcoord);
@@ -88,6 +94,7 @@ Shader "Hidden/SubsurfaceScattering/CombineLighting"
             #pragma vertex Vert
             #pragma fragment Frag
             #pragma multi_compile_fog
+            #pragma multi_compile _ SSS_HALF_RES
             ENDHLSL
         }
     }

@@ -67,6 +67,12 @@ namespace SoulRender
             filteringDesc.msaaSamples = 1; // No MSAA for compute/separable output
             filteringDesc.enableRandomWrite = !m_UseSeparableSSS; // Only need random write for 5S compute shader path
             filteringDesc.useDynamicScale = false;
+            // When half-res SSS is enabled (5S only), allocate the filtering buffer at half resolution
+            if (m_HalfResSSS && !m_UseSeparableSSS)
+            {
+                filteringDesc.width = Mathf.Max(1, width / 2);
+                filteringDesc.height = Mathf.Max(1, height / 2);
+            }
             RenderingUtils.ReAllocateIfNeeded(ref m_FilteringRT, filteringDesc, FilterMode.Bilinear, 
                 TextureWrapMode.Clamp, name: SSSShaderIDs.SSSFilteringTextureName);
 
@@ -308,10 +314,14 @@ namespace SoulRender
                 // Set keywords
                 CoreUtils.SetKeyword(cs, "USE_DOWNSAMPLE", m_DownsampleSteps > 0);
                 CoreUtils.SetKeyword(cs, "USE_SSS_OCCLUSION", m_SubsurfaceScatteringAttenuation);
+                CoreUtils.SetKeyword(cs, "SSS_HALF_RES", m_HalfResSSS);
 
                 // Calculate tile count (16x16 thread groups)
-                int numTilesX = (cameraDescriptor.width + 15) / 16;
-                int numTilesY = (cameraDescriptor.height + 15) / 16;
+                // When half-res, dispatch at half dimensions (each thread processes one half-res pixel)
+                int filterWidth = m_HalfResSSS ? Mathf.Max(1, cameraDescriptor.width / 2) : cameraDescriptor.width;
+                int filterHeight = m_HalfResSSS ? Mathf.Max(1, cameraDescriptor.height / 2) : cameraDescriptor.height;
+                int numTilesX = (filterWidth + 15) / 16;
+                int numTilesY = (filterHeight + 15) / 16;
                 Vector2 viewportSize = new Vector2(cameraDescriptor.width, cameraDescriptor.height);
 
                 // Step 1: Downsample if enabled
@@ -412,6 +422,9 @@ namespace SoulRender
                 RTHandle depthTarget = cameraData.renderer.cameraDepthTargetHandle;
                 
                 m_CombineLightingMaterial.SetTexture(SSSShaderIDs._IrradianceSource, m_FilteringRT);
+                
+                // Set half-res keyword on CombineLighting material to enable bilinear upsample
+                CoreUtils.SetKeyword(m_CombineLightingMaterial, "SSS_HALF_RES", m_HalfResSSS && !m_UseSeparableSSS);
                 
                 CoreUtils.SetRenderTarget(cmd, colorTarget, 
                     RenderBufferLoadAction.Load, RenderBufferStoreAction.Store,
