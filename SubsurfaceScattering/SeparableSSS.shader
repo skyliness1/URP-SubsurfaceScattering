@@ -69,7 +69,9 @@ Shader "Hidden/SubsurfaceScattering/SeparableSSS"
 
                 #ifdef SSSS_FOLLOW_SURFACE
                     float depth = LinearEyeDepth(SAMPLE_TEXTURE2D_X(_CameraDepthTexture, sampler_CameraDepthTexture, offset), _ZBufferParams);
-                    float s = 1 - exp(-_SSSSDepthFalloff * 10 * _DistanceToProjectionWindow * abs(depthM - depth));
+                    // Depth sensitivity scaling factor (from Jimenez et al. reference implementation)
+                    // Higher values = more aggressive depth discontinuity rejection
+                    float s = 1 - exp(-_SSSSDepthFalloff * 10.0 * _DistanceToProjectionWindow * abs(depthM - depth));
                     color.rgb = lerp(color.rgb, colorM.rgb, s);
                 #endif
 

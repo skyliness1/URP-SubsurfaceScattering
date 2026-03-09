@@ -60,12 +60,12 @@ namespace SoulRender
             RenderingUtils.ReAllocateIfNeeded(ref m_SSSBufferRT, sssBufferDesc, FilterMode.Point, 
                 TextureWrapMode.Clamp, name: SSSShaderIDs.SSSBufferTextureName);
 
-            // Filtering buffer (no MSAA, used for compute output or 4S separable output)
+            // Filtering buffer (no MSAA, used for compute shader output in 5S or separable blur output in 4S)
             var filteringDesc = cameraDescriptor;
             filteringDesc.graphicsFormat = GraphicsFormat.B10G11R11_UFloatPack32;
             filteringDesc.depthBufferBits = 0;
             filteringDesc.msaaSamples = 1; // No MSAA for compute/separable output
-            filteringDesc.enableRandomWrite = !m_UseSeparableSSS; // Only need random write for 5S compute
+            filteringDesc.enableRandomWrite = !m_UseSeparableSSS; // Only need random write for 5S compute shader path
             filteringDesc.useDynamicScale = false;
             RenderingUtils.ReAllocateIfNeeded(ref m_FilteringRT, filteringDesc, FilterMode.Bilinear, 
                 TextureWrapMode.Clamp, name: SSSShaderIDs.SSSFilteringTextureName);

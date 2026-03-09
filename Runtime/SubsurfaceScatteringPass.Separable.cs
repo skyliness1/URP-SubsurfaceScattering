@@ -13,6 +13,14 @@ namespace SoulRender
     {
         // 4S constants
         private const int kSeparableSampleCount = 11;
+        // Epsilon to prevent division by zero in Gaussian falloff calculation
+        private const float kFalloffEpsilon = 0.001f;
+        // Minimum per-channel falloff to avoid extremely narrow Gaussians that cause artifacts
+        private const float kMinFalloffThreshold = 0.05f;
+        // FOV reduction factor for projection window distance calculation.
+        // Reduces the effective FOV to ~1/3 to produce a less aggressive depth-based blur scaling.
+        // This value comes from the reference 4S implementation (Jimenez et al.).
+        private const float kFovReductionFactor = 0.333f;
 
         // 4S material and kernel
         private Material m_SeparableSSSMaterial;
@@ -77,7 +85,7 @@ namespace SoulRender
             Vector3 g = Vector3.zero;
             for (int i = 0; i < 3; i++)
             {
-                float rr = r / (0.001f + falloff[i]);
+                float rr = r / (kFalloffEpsilon + falloff[i]);
                 g[i] = Mathf.Exp(-(rr * rr) / (2.0f * variance)) / (2.0f * Mathf.PI * variance);
             }
             return g;
@@ -199,9 +207,9 @@ namespace SoulRender
                 // Normalize so the channel with largest scatter gets 1.0
                 falloff = new Vector3(sd_r / maxSD, sd_g / maxSD, sd_b / maxSD);
                 // Clamp minimum to avoid division by zero in Gaussian
-                falloff.x = Mathf.Max(falloff.x, 0.05f);
-                falloff.y = Mathf.Max(falloff.y, 0.05f);
-                falloff.z = Mathf.Max(falloff.z, 0.05f);
+                falloff.x = Mathf.Max(falloff.x, kMinFalloffThreshold);
+                falloff.y = Mathf.Max(falloff.y, kMinFalloffThreshold);
+                falloff.z = Mathf.Max(falloff.z, kMinFalloffThreshold);
             }
             else
             {
@@ -241,7 +249,7 @@ namespace SoulRender
             UpdateSeparableKernelFromProfile();
 
             // Compute distance to projection window (perspective correction)
-            float distanceToProjectionWindow = 1.0f / Mathf.Tan(0.5f * Mathf.Deg2Rad * camera.fieldOfView * 0.333f);
+            float distanceToProjectionWindow = 1.0f / Mathf.Tan(0.5f * Mathf.Deg2Rad * camera.fieldOfView * kFovReductionFactor);
 
             // Set material properties
             m_SeparableSSSMaterial.SetVectorArray("_Kernel", m_SeparableKernel);
