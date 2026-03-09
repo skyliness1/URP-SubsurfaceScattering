@@ -73,6 +73,16 @@ Shader "Hidden/SubsurfaceScattering/SeparableSSS"
                 // Scale blur step by subsurfaceMask so per-pixel masking controls blur radius
                 float2 finalStep = _SSSSDirection.xy * scale * _CameraDepthTexture_TexelSize.xy * subsurfaceMask;
 
+                // Clamp the step to prevent artifacts when camera is very close to the surface.
+                // When depth is tiny, scale→∞ and the outermost kernel samples (at offset ±RANGE)
+                // extend far beyond screen boundaries. sampler_LinearClamp repeats edge pixels,
+                // creating visible stripe artifacts around screen edges.
+                // Cap the outermost sample to 10% of screen in UV space.
+                #define KERNEL_RANGE 3.0 // max kernel offset for nSamples=25 with RANGE=3
+                float maxStepPerUnit = 0.1 / KERNEL_RANGE; // max UV step per kernel unit
+                float stepLen = length(finalStep);
+                finalStep *= (stepLen > maxStepPerUnit) ? (maxStepPerUnit / stepLen) : 1.0;
+
                 float4 colorBlurred = colorM;
                 colorBlurred.rgb *= _Kernel[0].rgb;
 
