@@ -129,16 +129,21 @@ void FilterSeparable(uint2 pixelCoord, bool horizontal)
     float metersPerUnit = _WorldScalesAndFilterRadiiAndThicknessRemaps[profileIndex].x;
     float filterRadius  = _WorldScalesAndFilterRadiiAndThicknessRemaps[profileIndex].y; // mm
 
-    // Convert filter radius from mm to pixels (same derivation as the disk sampler)
-    float2 screenUV    = (pixelCoord + 0.5) * _ScreenSize.zw;
-    float2 posNDC      = screenUV * 2.0 - 1.0;
-    float2 cornerNDC   = posNDC + 0.5 * _ScreenSize.zw;
-    float3 centerPosVS = ComputeViewSpacePosition(posNDC,    centerDepth, UNITY_MATRIX_I_P);
-    float3 cornerPosVS = ComputeViewSpacePosition(cornerNDC, centerDepth, UNITY_MATRIX_I_P);
-
+    // Convert filter radius from mm to pixels using a perspective-correct formula.
+    //
+    // In a perspective camera the view-space width of one screen pixel at linear
+    // eye-depth Z is:
+    //   unitsPerPixel = 2 * Z * tan(HFOV/2) / screenWidth
+    //                 = 2 * Z * UNITY_MATRIX_I_P[0][0] / screenWidth
+    //                 = 2 * Z * UNITY_MATRIX_I_P[0][0] * _ScreenSize.z
+    //
+    // UNITY_MATRIX_I_P[0][0] is the (0,0) element of the inverse projection matrix,
+    // which equals tan(HFOV/2) for a standard perspective projection.
+    // This avoids the coordinate-system ambiguity of passing NDC vs UV coordinates
+    // to ComputeViewSpacePosition.
     float mmPerUnit     = MILLIMETERS_PER_METER * (metersPerUnit * rcp(distScale));
     float unitsPerMm    = rcp(mmPerUnit);
-    float unitsPerPixel = max(0.0001, 2.0 * abs(cornerPosVS.x - centerPosVS.x));
+    float unitsPerPixel = max(0.0001, 2.0 * centerDepth * abs(UNITY_MATRIX_I_P[0][0]) * _ScreenSize.z);
     float pixelsPerMm   = rcp(unitsPerPixel) * unitsPerMm;
 
     // Bilateral scale: tighter => more edge preservation
