@@ -96,7 +96,7 @@ Shader "Hidden/SubsurfaceScattering/SeparableSSS"
                 // The 5S compute does: result = postScatterAlbedo * blur(diffuseLighting)
                 // For 4S separable: H-pass blurs, V-pass blurs + applies albedo once.
                 // Detect vertical pass: _SSSSDirection = (width,0) for H, (0,width) for V.
-                if (_SSSSDirection.x == 0.0)
+                if (abs(_SSSSDirection.x) < 0.0001)
                 {
                     // Post-scatter texturing mode (mirrors 5S compute SHADERPASS_SUBSURFACE_SCATTERING logic):
                     //   PreAndPostScatter (bit=0): albedo = sqrt(diffuseColor)
