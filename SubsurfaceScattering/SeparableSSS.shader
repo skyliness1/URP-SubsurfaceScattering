@@ -9,6 +9,8 @@ Shader "Hidden/SubsurfaceScattering/SeparableSSS"
     #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
     #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
     #include "Packages/com.unity.render-pipelines.universal/Shaders/PostProcessing/Common.hlsl"
+    // Access _TexturingModeFlags and _EnableSubsurfaceScattering for post-scatter albedo
+    #include "Packages/com.unity.render-pipelines.universal/ArtShaders/Scene/SubsurfaceScattering/Includes/ShaderVariablesGlobalSubsurface.hlsl"
 
     #define nSamples 25
 
@@ -88,6 +90,25 @@ Shader "Hidden/SubsurfaceScattering/SeparableSSS"
                 #endif
 
                     colorBlurred.rgb += _Kernel[i].rgb * color.rgb;
+                }
+
+                // Apply post-scatter albedo (vertical pass only) to match 5S compute behavior.
+                // The 5S compute does: result = postScatterAlbedo * blur(diffuseLighting)
+                // For 4S separable: H-pass blurs, V-pass blurs + applies albedo once.
+                // Detect vertical pass: _SSSSDirection = (width,0) for H, (0,width) for V.
+                if (_SSSSDirection.x == 0.0)
+                {
+                    // Post-scatter texturing mode (mirrors 5S compute SHADERPASS_SUBSURFACE_SCATTERING logic):
+                    //   PreAndPostScatter (bit=0): albedo = sqrt(diffuseColor)
+                    //   PostScatter (bit=1): albedo = diffuseColor (identity)
+                    float3 postScatterAlbedo = sssBuffer.rgb;
+                    if (_EnableSubsurfaceScattering != 0)
+                    {
+                        bool isPostScatter = ((_TexturingModeFlags >> profileIndex) & 1u) != 0;
+                        if (!isPostScatter)
+                            postScatterAlbedo = sqrt(postScatterAlbedo);
+                    }
+                    colorBlurred.rgb *= postScatterAlbedo;
                 }
 
                 return colorBlurred;
