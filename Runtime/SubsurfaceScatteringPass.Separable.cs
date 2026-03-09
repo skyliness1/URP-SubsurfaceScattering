@@ -17,10 +17,13 @@ namespace SoulRender
         private const float kFalloffEpsilon = 0.001f;
         // Minimum per-channel falloff to avoid extremely narrow Gaussians that cause artifacts
         private const float kMinFalloffThreshold = 0.05f;
-        // FOV reduction factor for projection window distance calculation.
-        // Reduces the effective FOV to ~1/3 to produce a less aggressive depth-based blur scaling.
-        // This value comes from the reference 4S implementation (Jimenez et al.).
-        private const float kFovReductionFactor = 0.333f;
+        // Millimeters per meter (for converting filter radius from mm to world units)
+        private const float kMillimetersPerMeter = 1000.0f;
+        // Depth falloff compensation factor.
+        // The depth follow shader formula uses: depthFalloff * 10 * distToProj * |Δd|.
+        // Previously distToProj was ~3x larger (due to FOV/3 approximation), so we compensate
+        // to maintain similar depth rejection sensitivity after switching to correct projection.
+        private const float kDepthFalloffCompensation = 3.0f;
 
         // 4S material and kernel
         private Material m_SeparableSSSMaterial;
@@ -248,12 +251,17 @@ namespace SoulRender
             // Update kernel from diffusion profile
             UpdateSeparableKernelFromProfile();
 
-            // Compute distance to projection window (perspective correction)
-            float distanceToProjectionWindow = 1.0f / Mathf.Tan(0.5f * Mathf.Deg2Rad * camera.fieldOfView * kFovReductionFactor);
+            // Use the camera's actual projection matrix for correct FOV handling.
+            // projectionMatrix.m11 = 1/tan(FOV/2), which correctly maps world-space vertical
+            // offsets to clip space. This ensures consistent blur across all cameras (Scene, Game, etc.)
+            // because different cameras with different FOVs all use their correct projection.
+            float distanceToProjectionWindow = camera.projectionMatrix.m11;
 
             // Set material properties
             m_SeparableSSSMaterial.SetVectorArray("_Kernel", m_SeparableKernel);
-            m_SeparableSSSMaterial.SetFloat("_SSSSDepthFalloff", m_SeparableDepthFalloff);
+            // Compensate depth falloff for the correct projection (previously distToProj was ~3x
+            // larger due to the FOV/3 approximation, so we scale to maintain similar sensitivity)
+            m_SeparableSSSMaterial.SetFloat("_SSSSDepthFalloff", m_SeparableDepthFalloff * kDepthFalloffCompensation);
             m_SeparableSSSMaterial.SetFloat("_DistanceToProjectionWindow", distanceToProjectionWindow);
 
             if (m_SeparableFollowSurface)
@@ -261,21 +269,41 @@ namespace SoulRender
             else
                 m_SeparableSSSMaterial.DisableKeyword("SSSS_FOLLOW_SURFACE");
 
-            // Derive width from primary profile's filter radius and world scale
+            // Derive width from DiffusionProfile with physically correct conversion.
+            //
+            // In the 5S compute shader, the blur is computed by:
+            //   1. Converting filterRadius (mm) to world units: R_world = filterRadius / (1000 * worldScale)
+            //   2. Computing pixelsPerMm from the camera's inverse projection matrix
+            //   3. Sampling at positions: pixelCoord + round(pixelsPerMm * r * direction)
+            //
+            // For the 4S shader, the blur formula is:
+            //   pixel_offset = width * distToProj / depth * kernel_offset
+            //
+            // To match the 5S physical scatter, we need:
+            //   width * distToProj / depth = R_world * projScale * (height/2) / depth
+            //   where projScale = 1/tan(FOV/2) = distToProj
+            //
+            // This simplifies to: width = R_world * height / 2
+            // With user control: width = R_world * height / 2 * separableWidth
+            //
+            // This makes the blur:
+            //   - Correctly scale with camera FOV (via distToProj)
+            //   - Correctly scale with resolution (via height)
+            //   - Match the 5S physical scatter when separableWidth ≈ 0.5
             float width = m_SeparableWidth;
+            float height = cameraDescriptor.height;
             if (m_DiffusionProfiles != null)
             {
                 for (int i = 0; i < m_DiffusionProfiles.Length; i++)
                 {
                     if (m_DiffusionProfiles[i] != null)
                     {
-                        float filterRadius = m_DiffusionProfiles[i].profile.filterRadius;
-                        float worldScale = m_DiffusionProfiles[i].profile.worldScale;
-                        // Convert filter radius (mm) to a screen-space width factor
-                        // filterRadius is in mm, worldScale is meters/unit
-                        // A typical skin profile has filterRadius ~10-25mm
-                        // We scale to a reasonable screen-space range
-                        width = filterRadius * worldScale * m_SeparableWidth;
+                        float filterRadius = m_DiffusionProfiles[i].profile.filterRadius; // In mm
+                        float worldScale = m_DiffusionProfiles[i].profile.worldScale;     // meters per unit
+                        // Convert filter radius from mm to world units
+                        float scatterRadiusWorld = filterRadius / (kMillimetersPerMeter * Mathf.Max(worldScale, 0.0001f));
+                        // Convert to the width parameter the shader expects
+                        width = scatterRadiusWorld * (height * 0.5f) * m_SeparableWidth;
                         break;
                     }
                 }

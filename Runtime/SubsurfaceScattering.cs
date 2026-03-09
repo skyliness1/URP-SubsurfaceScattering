@@ -71,7 +71,7 @@ namespace SoulRender
             [Tooltip("Separable SSS blur shader")]
             public Shader separableSSSShader;
 
-            [Tooltip("Width multiplier for the separable SSS blur. Controls overall blur radius derived from diffusion profile.")]
+            [Tooltip("Width multiplier for the separable SSS blur.\nseparableWidth ≈ 0.5 matches the 5S blur extent.\nValues < 0.5 produce a subtler effect, > 0.5 a stronger effect.")]
             [Range(0.01f, 5.0f)]
             public float separableWidth = 0.3f;
 

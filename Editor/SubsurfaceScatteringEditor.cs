@@ -178,7 +178,7 @@ namespace SoulRender
                 if (isFourS)
                 {
                     // 4S Quality Settings
-                    EditorGUILayout.PropertyField(m_SeparableWidthProperty, new GUIContent("Blur Width Multiplier", "Width multiplier for the separable SSS blur. Controls overall blur radius derived from diffusion profile."));
+                    EditorGUILayout.PropertyField(m_SeparableWidthProperty, new GUIContent("Blur Width Multiplier", "Width multiplier for the separable SSS blur.\n≈0.5 matches the 5S blur extent.\nValues <0.5 produce a subtler effect, >0.5 a stronger effect."));
                     EditorGUILayout.PropertyField(m_SeparableDepthFalloffProperty, new GUIContent("Depth Falloff", "Controls how harshly depth discontinuities limit the blur."));
                     EditorGUILayout.PropertyField(m_SeparableFollowSurfaceProperty, new GUIContent("Follow Surface Depth", "Prevents the blur from crossing depth discontinuities."));
                 }
