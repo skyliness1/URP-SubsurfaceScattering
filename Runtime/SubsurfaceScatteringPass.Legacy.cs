@@ -22,6 +22,7 @@ namespace SoulRender
         private RTHandle m_DiffusionProfileIndexRT;
         private RTHandle m_ResolvedStencilRT;
         private RTHandle m_ResolvedDepthRT;
+        private RTHandle m_SeparableIntermediateRT;
         private ComputeBuffer m_CoarseStencilBuffer;
 
         /// <summary>
@@ -124,6 +125,19 @@ namespace SoulRender
                 resolvedDepthDesc.useDynamicScale = false;
                 RenderingUtils.ReAllocateIfNeeded(ref m_ResolvedDepthRT, resolvedDepthDesc, FilterMode.Point, 
                     TextureWrapMode.Clamp, name: "DepthBufferResolved");
+            }
+
+            // Separable intermediate buffer (horizontal pass output, same format as m_FilteringRT)
+            if (m_FilterMode == SubsurfaceScattering.SSSFilterMode.SeparableFilter)
+            {
+                var separableDesc = cameraDescriptor;
+                separableDesc.graphicsFormat = GraphicsFormat.B10G11R11_UFloatPack32;
+                separableDesc.depthBufferBits = 0;
+                separableDesc.msaaSamples = 1;
+                separableDesc.enableRandomWrite = true;
+                separableDesc.useDynamicScale = false;
+                RenderingUtils.ReAllocateIfNeeded(ref m_SeparableIntermediateRT, separableDesc, FilterMode.Bilinear,
+                    TextureWrapMode.Clamp, name: SSSShaderIDs.SSSSeparableIntermediateName);
             }
         }
 
@@ -286,6 +300,12 @@ namespace SoulRender
         {
             using (new ProfilingScope(cmd, m_SSSFilteringSampler))
             {
+                if (m_FilterMode == SubsurfaceScattering.SSSFilterMode.SeparableFilter)
+                {
+                    ExecuteSSSFilteringSeparable(cmd, cameraDescriptor, depthTexture, viewCount);
+                    return;
+                }
+
                 var cs = m_SubsurfaceScatteringCS;
 
                 // Set keywords
@@ -379,6 +399,68 @@ namespace SoulRender
         }
 
         /// <summary>
+        /// Execute the two-pass separable SSS filter (horizontal then vertical).
+        /// Writes final result to m_FilteringRT so ExecuteCombineLighting() works unchanged.
+        /// </summary>
+        private void ExecuteSSSFilteringSeparable(CommandBuffer cmd, RenderTextureDescriptor cameraDescriptor,
+            RTHandle depthTexture, int viewCount)
+        {
+            var cs = m_SubsurfaceScatteringSeparableCS;
+            if (cs == null || m_SSSKernelData == null) return;
+
+            int width  = cameraDescriptor.width;
+            int height = cameraDescriptor.height;
+
+            // Set keywords
+            CoreUtils.SetKeyword(cs, "USE_DOWNSAMPLE", m_DownsampleSteps > 0);
+
+            // Tile count for 8×8 thread groups
+            int tilesX = (width  + 7) / 8;
+            int tilesY = (height + 7) / 8;
+
+            // Bind kernel data
+            cmd.SetComputeVectorArrayParam(cs, SSSShaderIDs._SSSKernel, m_SSSKernelData);
+            cmd.SetComputeIntParam(cs, SSSShaderIDs._SSSKernelSize, m_SeparableKernelSize);
+            cmd.SetComputeFloatParam(cs, SSSShaderIDs._GlobalDetailPreservation, m_globalDetailPreservation);
+            cmd.SetComputeIntParam(cs, SSSShaderIDs._SssDownsampleSteps, m_DownsampleSteps);
+
+            // Shared input textures
+            cmd.SetComputeTextureParam(cs, m_SSSFilterHorizontalKernel, SSSShaderIDs._DepthTexture, depthTexture);
+            cmd.SetComputeTextureParam(cs, m_SSSFilterHorizontalKernel, SSSShaderIDs._IrradianceSource, m_DiffuseRT);
+            cmd.SetComputeTextureParam(cs, m_SSSFilterHorizontalKernel, SSSShaderIDs.SSSBufferTexture, m_SSSBufferRT);
+
+            cmd.SetComputeTextureParam(cs, m_SSSFilterVerticalKernel, SSSShaderIDs._DepthTexture, depthTexture);
+            cmd.SetComputeTextureParam(cs, m_SSSFilterVerticalKernel, SSSShaderIDs._IrradianceSource, m_DiffuseRT);
+            cmd.SetComputeTextureParam(cs, m_SSSFilterVerticalKernel, SSSShaderIDs.SSSBufferTexture, m_SSSBufferRT);
+
+            // Downsample pass
+            if (m_DownsampleSteps > 0 && m_DownsampleRT != null)
+            {
+                int shift = m_DownsampleSteps - 1;
+                var downsampleCS = m_SubsurfaceScatteringDownsampleCS;
+                cmd.SetComputeIntParam(downsampleCS, SSSShaderIDs._FrameCount, UnityEngine.Time.frameCount);
+                cmd.SetComputeIntParam(downsampleCS, SSSShaderIDs._SssDownsampleSteps, m_DownsampleSteps);
+                cmd.SetComputeTextureParam(downsampleCS, m_SubsurfaceScatteringDownsampleKernel, SSSShaderIDs._SourceTexture, m_DiffuseRT);
+                cmd.SetComputeTextureParam(downsampleCS, m_SubsurfaceScatteringDownsampleKernel, SSSShaderIDs._OutputTexture, m_DownsampleRT);
+                int dsX = Mathf.Max(1, tilesX >> shift);
+                int dsY = Mathf.Max(1, tilesY >> shift);
+                cmd.DispatchCompute(downsampleCS, m_SubsurfaceScatteringDownsampleKernel, dsX, dsY, viewCount);
+
+                cmd.SetComputeTextureParam(cs, m_SSSFilterHorizontalKernel, SSSShaderIDs._IrradianceSourceDownsampled, m_DownsampleRT);
+                cmd.SetComputeTextureParam(cs, m_SSSFilterVerticalKernel, SSSShaderIDs._IrradianceSourceDownsampled, m_DownsampleRT);
+            }
+
+            // Horizontal pass → m_SeparableIntermediateRT
+            cmd.SetComputeTextureParam(cs, m_SSSFilterHorizontalKernel, SSSShaderIDs._CameraFilteringTexture, m_SeparableIntermediateRT);
+            cmd.DispatchCompute(cs, m_SSSFilterHorizontalKernel, tilesX, tilesY, viewCount);
+
+            // Vertical pass: read from intermediate, write to m_FilteringRT
+            cmd.SetComputeTextureParam(cs, m_SSSFilterVerticalKernel, SSSShaderIDs._SeparableInput, m_SeparableIntermediateRT);
+            cmd.SetComputeTextureParam(cs, m_SSSFilterVerticalKernel, SSSShaderIDs._CameraFilteringTexture, m_FilteringRT);
+            cmd.DispatchCompute(cs, m_SSSFilterVerticalKernel, tilesX, tilesY, viewCount);
+        }
+
+        /// <summary>
         /// Combine filtered diffuse lighting with color buffer (following URP Blitter pattern)
         /// </summary>
         private void ExecuteCombineLighting(CommandBuffer cmd, ref RenderingData renderingData)
@@ -437,6 +519,7 @@ namespace SoulRender
             m_DiffusionProfileIndexRT?.Release();
             m_ResolvedStencilRT?.Release();
             m_ResolvedDepthRT?.Release();
+            m_SeparableIntermediateRT?.Release();
             m_CoarseStencilBuffer?.Release();
 
             m_DiffuseRT = null;
@@ -446,6 +529,7 @@ namespace SoulRender
             m_DiffusionProfileIndexRT = null;
             m_ResolvedStencilRT = null;
             m_ResolvedDepthRT = null;
+            m_SeparableIntermediateRT = null;
             m_CoarseStencilBuffer = null;
         }
     }

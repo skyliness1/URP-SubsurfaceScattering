@@ -11,6 +11,15 @@ namespace SoulRender
     /// </summary>
     public class SubsurfaceScattering : ScriptableRendererFeature
     {
+        /// <summary>Filter mode for the SSS pass.</summary>
+        public enum SSSFilterMode
+        {
+            /// <summary>Disk-sampling compute shader (original quality path).</summary>
+            DiskSampling,
+            /// <summary>Two-pass separable 1D bilateral filter (faster, noise-free).</summary>
+            SeparableFilter
+        }
+
         [Serializable]
         public class Settings
         {
@@ -50,6 +59,16 @@ namespace SoulRender
             [Tooltip("Combine lighting shader (additive blend of SSS filtered diffuse with color buffer)")]
             public Shader combineLightingShader;
 
+            [Tooltip("Filter mode: DiskSampling (original) or SeparableFilter (faster, mobile-friendly).")]
+            public SSSFilterMode filterMode = SSSFilterMode.DiskSampling;
+
+            [Tooltip("Separable filter compute shader (two-pass horizontal + vertical Burley blur)")]
+            public ComputeShader subsurfaceScatteringSeparableCS;
+
+            [Tooltip("Number of kernel taps for the separable filter.")]
+            [Range(3, 25)]
+            public int separableKernelSize = 11;
+
             /// <summary>
             /// Validate that all required assets are assigned
             /// </summary>
@@ -59,6 +78,9 @@ namespace SoulRender
                                          subsurfaceScatteringDownsampleCS != null &&
                                          resolveStencilCS != null &&
                                          combineLightingShader != null;
+
+                if (filterMode == SSSFilterMode.SeparableFilter)
+                    hasRequiredShaders = hasRequiredShaders && subsurfaceScatteringSeparableCS != null;
                 
                 return hasRequiredShaders;
             }
@@ -131,7 +153,10 @@ namespace SoulRender
                 settings.sampleBudget,
                 settings.downsampleSteps,
                 settings.subsurfaceScatteringAttenuation,
-                settings.globalDetailPreservation);
+                settings.globalDetailPreservation,
+                settings.filterMode,
+                settings.subsurfaceScatteringSeparableCS,
+                settings.separableKernelSize);
         }
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)

@@ -1,0 +1,233 @@
+// =============== Separable (two-pass) Subsurface Scattering filter ================
+// Horizontal + Vertical 1D bilateral passes using a CPU-precomputed Burley kernel.
+// Adapted for URP from HDRP conventions.
+
+//--------------------------------------------------------------------------------------------------
+// Definitions
+//--------------------------------------------------------------------------------------------------
+
+// #pragma enable_d3d11_debug_symbols
+#pragma only_renderers d3d11 playstation xboxone xboxseries vulkan metal switch
+
+#pragma kernel SSSFilterHorizontal
+#pragma kernel SSSFilterVertical VERTICAL_PASS
+
+#pragma multi_compile _ USE_DOWNSAMPLE
+
+//--------------------------------------------------------------------------------------------------
+// Included headers
+//--------------------------------------------------------------------------------------------------
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Packing.hlsl"
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Sampling/Sampling.hlsl"
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/SpaceFillingCurves.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareNormalsTexture.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ArtShaders/Scene/SubsurfaceScattering/Includes/SubsurfaceScattering.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ArtShaders/Scene/SubsurfaceScattering/Includes/ShaderVariablesGlobalSubsurface.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ArtShaders/Scene/SubsurfaceScattering/Includes/DiffusionProfileSettings.cs.hlsl"
+
+//--------------------------------------------------------------------------------------------------
+// Inputs & outputs
+//--------------------------------------------------------------------------------------------------
+
+int   _SssDownsampleSteps;
+float _GlobalDetailPreservation;
+
+// CPU-precomputed Burley kernel: .xyz = normalized per-channel weight, .w = normalized offset [-1,1]
+float4 _SSSKernel[25];
+int    _SSSKernelSize;
+
+TEXTURE2D_X(_DepthTexture);         // Camera depth
+TEXTURE2D_X(_IrradianceSource);     // Full-res diffuse irradiance
+TEXTURE2D_X(_IrradianceSourceDownsampled); // Downsampled variant
+
+// For horizontal pass: _SSSBufferTexture is declared in SubsurfaceScattering.hlsl
+// Output of horizontal pass / input of vertical pass
+RW_TEXTURE2D(float4, _CameraFilteringTexture);
+
+#ifdef VERTICAL_PASS
+TEXTURE2D_X(_SeparableInput); // Horizontal pass output (read-only in vertical pass)
+#endif
+
+//--------------------------------------------------------------------------------------------------
+// Implementation
+//--------------------------------------------------------------------------------------------------
+
+// Load a pixel's irradiance (handles downsample).
+float3 LoadIrradiance(int2 coord)
+{
+#ifndef USE_DOWNSAMPLE
+    return LOAD_TEXTURE2D_X(_IrradianceSource, coord).rgb;
+#else
+    return LOAD_TEXTURE2D_X(_IrradianceSourceDownsampled, coord >> _SssDownsampleSteps).rgb;
+#endif
+}
+
+// Always loads from the full-resolution irradiance source.
+// Used for detail-preservation in the final (vertical) pass so we restore
+// original-resolution high-frequency detail regardless of the downsample setting.
+float3 LoadOriginalIrradiance(int2 coord)
+{
+    return LOAD_TEXTURE2D_X(_IrradianceSource, coord).rgb;
+}
+
+// Load a pixel's linear eye depth from the depth buffer.
+float LoadLinearDepth(int2 coord)
+{
+    float rawDepth = LOAD_TEXTURE2D_X(_DepthTexture, coord).r;
+    return LinearEyeDepth(rawDepth, _ZBufferParams);
+}
+
+// Bilateral weight based on depth difference.
+// scale controls how tightly we preserve depth edges.
+float BilateralDepthWeight(float depthDiff, float scale)
+{
+    return exp(-depthDiff * depthDiff * scale);
+}
+
+void FilterSeparable(uint2 pixelCoord, bool horizontal)
+{
+    // Decode SSS data for the center pixel
+    SSSData sssData;
+    DECODE_FROM_SSSBUFFER(pixelCoord, sssData);
+
+    int   profileIndex = sssData.diffusionProfileIndex;
+    float distScale    = sssData.subsurfaceMask;
+
+    // Center irradiance:
+    //   H pass  → read from the original irradiance source
+    //   V pass  → read from the horizontal-pass output (raw, no albedo)
+    float3 centerIrradiance;
+#ifdef VERTICAL_PASS
+    centerIrradiance = LOAD_TEXTURE2D_X(_SeparableInput, pixelCoord).rgb;
+#else
+    centerIrradiance = LoadIrradiance(pixelCoord);
+#endif
+    float centerDepth = LoadLinearDepth(pixelCoord);
+
+    // If no scattering or not an SSS pixel:
+    //   H pass  → write raw irradiance (no albedo) so V-pass neighbours sample correctly
+    //   V pass  → write albedo-weighted result so the buffer is consistent, but the
+    //             combine lighting pass uses a stencil test to skip non-SSS pixels,
+    //             so this value is never actually blended onto the colour buffer.
+    if (distScale == 0 || !TestLightingForSSS(centerIrradiance))
+    {
+#ifdef VERTICAL_PASS
+        uint   texturingMode = GetSubsurfaceScatteringTexturingMode(profileIndex);
+        float3 albedo        = ApplySubsurfaceScatteringTexturingMode(texturingMode, sssData.diffuseColor);
+        _CameraFilteringTexture[pixelCoord] = float4(albedo * centerIrradiance, 1.0);
+#else
+        _CameraFilteringTexture[pixelCoord] = float4(centerIrradiance, 1.0);
+#endif
+        return;
+    }
+
+    // Per-profile parameters
+    float metersPerUnit = _WorldScalesAndFilterRadiiAndThicknessRemaps[profileIndex].x;
+    float filterRadius  = _WorldScalesAndFilterRadiiAndThicknessRemaps[profileIndex].y; // mm
+
+    // Convert filter radius from mm to pixels using a perspective-correct formula.
+    //
+    // In a perspective camera the view-space width of one screen pixel at linear
+    // eye-depth Z is:
+    //   unitsPerPixel = 2 * Z * tan(HFOV/2) / screenWidth
+    //                 = 2 * Z * UNITY_MATRIX_I_P[0][0] / screenWidth
+    //                 = 2 * Z * UNITY_MATRIX_I_P[0][0] * _ScreenSize.z
+    //
+    // UNITY_MATRIX_I_P[0][0] is the (0,0) element of the inverse projection matrix,
+    // which equals tan(HFOV/2) for a standard perspective projection.
+    // This avoids the coordinate-system ambiguity of passing NDC vs UV coordinates
+    // to ComputeViewSpacePosition.
+    float mmPerUnit     = MILLIMETERS_PER_METER * (metersPerUnit * rcp(distScale));
+    float unitsPerMm    = rcp(mmPerUnit);
+    float unitsPerPixel = max(0.0001, 2.0 * centerDepth * abs(UNITY_MATRIX_I_P[0][0]) * _ScreenSize.z);
+    float pixelsPerMm   = rcp(unitsPerPixel) * unitsPerMm;
+
+    // Bilateral scale: tighter => more edge preservation
+    float bilateralScale = 10.0;
+
+    // Accumulate weighted irradiance
+    float3 totalIrradiance = 0;
+    float3 totalWeight     = 0;
+
+    for (int i = 0; i < _SSSKernelSize; i++)
+    {
+        float4 tap    = _SSSKernel[i];
+        float3 weight = tap.xyz;
+        float  t      = tap.w; // normalized offset in [-1, 1]
+
+        // Map normalized offset to pixels using the per-pixel filter radius
+        float offsetMm     = t * filterRadius;
+        float offsetPixels = offsetMm * pixelsPerMm;
+
+        int2 sampleCoord;
+        if (horizontal)
+            sampleCoord = (int2)pixelCoord + int2((int)round(offsetPixels), 0);
+        else
+            sampleCoord = (int2)pixelCoord + int2(0, (int)round(offsetPixels));
+
+        // Clamp to screen
+        sampleCoord = clamp(sampleCoord, int2(0, 0), int2((int)_ScreenSize.x - 1, (int)_ScreenSize.y - 1));
+
+        float3 sampleIrradiance;
+#ifdef VERTICAL_PASS
+        sampleIrradiance = LOAD_TEXTURE2D_X(_SeparableInput, sampleCoord).rgb;
+#else
+        sampleIrradiance = LoadIrradiance(sampleCoord);
+#endif
+
+        // Bilateral depth weight
+        float sampleDepth = LoadLinearDepth(sampleCoord);
+        float depthDiff   = sampleDepth - centerDepth;
+        float bw          = BilateralDepthWeight(depthDiff, bilateralScale);
+
+        float3 w = weight * bw;
+        totalIrradiance += w * sampleIrradiance;
+        totalWeight     += w;
+    }
+
+    float3 blurred = totalIrradiance / max(totalWeight, FLT_MIN);
+
+#ifdef VERTICAL_PASS
+    // ── Final (vertical) pass ──────────────────────────────────────────────
+    // Apply texturing / albedo (only once, here in the final pass).
+    uint   texturingMode = GetSubsurfaceScatteringTexturingMode(profileIndex);
+    float3 albedo        = ApplySubsurfaceScatteringTexturingMode(texturingMode, sssData.diffuseColor);
+
+    // Detail preservation: compare against the ORIGINAL (unfiltered) irradiance,
+    // not the H-filtered intermediate stored in centerIrradiance / _SeparableInput.
+    // The H pass already blurred the signal, so using it as the "original" would
+    // mis-represent what high-frequency detail needs to be added back.
+    // LoadOriginalIrradiance always reads the full-resolution _IrradianceSource so
+    // that this matches the disk-sampler's behaviour even when USE_DOWNSAMPLE is set.
+    float3 originalIrradiance = LoadOriginalIrradiance(pixelCoord);
+    float3 highFreq = originalIrradiance - blurred;
+    float3 final    = max(blurred + highFreq * _GlobalDetailPreservation, 0);
+
+    _CameraFilteringTexture[pixelCoord] = float4(albedo * final, 1.0);
+#else
+    // ── Horizontal pass ────────────────────────────────────────────────────
+    // Write raw blurred irradiance with NO albedo and NO detail preservation.
+    // Albedo and detail preservation are applied once in the vertical pass.
+    _CameraFilteringTexture[pixelCoord] = float4(blurred, 1.0);
+#endif
+}
+
+[numthreads(8, 8, 1)]
+void SSSFilterHorizontal(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    UNITY_XR_ASSIGN_VIEW_INDEX(dispatchThreadId.z);
+    uint2 pixelCoord = dispatchThreadId.xy;
+    FilterSeparable(pixelCoord, true);
+}
+
+[numthreads(8, 8, 1)]
+void SSSFilterVertical(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    UNITY_XR_ASSIGN_VIEW_INDEX(dispatchThreadId.z);
+    uint2 pixelCoord = dispatchThreadId.xy;
+    FilterSeparable(pixelCoord, false);
+}

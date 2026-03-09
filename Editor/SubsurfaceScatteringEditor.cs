@@ -21,13 +21,17 @@ namespace SoulRender
         private SerializedProperty m_SampleBudgetProperty;
         private SerializedProperty m_DownsampleStepsProperty;
         private SerializedProperty m_SubsurfaceScatteringAttenuationProperty;
-        
         private SerializedProperty m_globalDetailPreservationProperty;
         
+        // Filter mode
+        private SerializedProperty m_FilterModeProperty;
+        private SerializedProperty m_SeparableKernelSizeProperty;
+
         // Compute shaders
         private SerializedProperty m_SubsurfaceScatteringCSProperty;
         private SerializedProperty m_SubsurfaceScatteringDownsampleCSProperty;
         private SerializedProperty m_ResolveStencilCSProperty;
+        private SerializedProperty m_SubsurfaceScatteringSeparableCSProperty;
         
         // Shaders
         private SerializedProperty m_CombineLightingShaderProperty;
@@ -57,13 +61,17 @@ namespace SoulRender
             m_SampleBudgetProperty = m_SettingsProperty.FindPropertyRelative("sampleBudget");
             m_DownsampleStepsProperty = m_SettingsProperty.FindPropertyRelative("downsampleSteps");
             m_SubsurfaceScatteringAttenuationProperty = m_SettingsProperty.FindPropertyRelative("subsurfaceScatteringAttenuation");
-            
             m_globalDetailPreservationProperty = m_SettingsProperty.FindPropertyRelative("globalDetailPreservation");
+            
+            // Filter mode
+            m_FilterModeProperty = m_SettingsProperty.FindPropertyRelative("filterMode");
+            m_SeparableKernelSizeProperty = m_SettingsProperty.FindPropertyRelative("separableKernelSize");
             
             // Compute shaders
             m_SubsurfaceScatteringCSProperty = m_SettingsProperty.FindPropertyRelative("subsurfaceScatteringCS");
             m_SubsurfaceScatteringDownsampleCSProperty = m_SettingsProperty.FindPropertyRelative("subsurfaceScatteringDownsampleCS");
             m_ResolveStencilCSProperty = m_SettingsProperty.FindPropertyRelative("resolveStencilCS");
+            m_SubsurfaceScatteringSeparableCSProperty = m_SettingsProperty.FindPropertyRelative("subsurfaceScatteringSeparableCS");
             
             // Shaders
             m_CombineLightingShaderProperty = m_SettingsProperty.FindPropertyRelative("combineLightingShader");
@@ -81,6 +89,8 @@ namespace SoulRender
             serializedObject.Update();
 
             EditorGUILayout.Space(5);
+
+            bool isSeparable = m_FilterModeProperty.enumValueIndex == (int)SubsurfaceScattering.SSSFilterMode.SeparableFilter;
             
             // Diffusion Profiles foldout
             m_ProfilesFoldout = EditorGUILayout.Foldout(m_ProfilesFoldout, "Diffusion Profiles", true, EditorStyles.foldoutHeader);
@@ -149,7 +159,20 @@ namespace SoulRender
             {
                 EditorGUI.indentLevel++;
                 
-                EditorGUILayout.PropertyField(m_SampleBudgetProperty, new GUIContent("Sample Budget", "Sample budget for SSS filtering (higher = better quality, slower)"));
+                // Filter mode
+                EditorGUILayout.PropertyField(m_FilterModeProperty, new GUIContent("Filter Mode", "DiskSampling: original quality path. SeparableFilter: two-pass horizontal+vertical Burley filter (faster, noise-free, mobile-friendly)."));
+
+                if (isSeparable)
+                {
+                    EditorGUI.indentLevel++;
+                    EditorGUILayout.PropertyField(m_SeparableKernelSizeProperty, new GUIContent("Kernel Size", "Number of kernel taps for the separable filter [3..25]. Higher values give smoother results."));
+                    EditorGUI.indentLevel--;
+                }
+                else
+                {
+                    EditorGUILayout.PropertyField(m_SampleBudgetProperty, new GUIContent("Sample Budget", "Sample budget for SSS filtering (higher = better quality, slower)"));
+                }
+
                 EditorGUILayout.PropertyField(m_DownsampleStepsProperty, new GUIContent("Downsample Steps", "Downsample steps (0 = full resolution, 1 = half, 2 = quarter)"));
                 EditorGUILayout.PropertyField(m_SubsurfaceScatteringAttenuationProperty, new GUIContent("SSS Attenuation", "Enable SubSurface-Scattering occlusion computation. Enabling this makes the SSS slightly more expensive but add great details to occluded zones with SSS materials."));
                 EditorGUILayout.PropertyField(m_globalDetailPreservationProperty, new GUIContent("Global Detail Preservation", "Global detail preservation for SSS."));
@@ -175,6 +198,12 @@ namespace SoulRender
                 EditorGUILayout.PropertyField(m_SubsurfaceScatteringDownsampleCSProperty, new GUIContent("SSS Downsample", "Downsample compute shader"));
                 EditorGUILayout.PropertyField(m_ResolveStencilCSProperty, new GUIContent("Resolve Stencil", "Resolve stencil compute shader (for coarse stencil optimization)"));
                 EditorGUILayout.PropertyField(m_CombineLightingShaderProperty, new GUIContent("Combine Lighting", "Combine lighting shader (additive blend of SSS filtered diffuse with color buffer)"));
+
+                if (isSeparable)
+                {
+                    EditorGUILayout.Space(3);
+                    EditorGUILayout.PropertyField(m_SubsurfaceScatteringSeparableCSProperty, new GUIContent("SSS Separable Filter", "Two-pass separable (horizontal + vertical) Burley filter compute shader"));
+                }
                 
                 EditorGUI.indentLevel--;
             }
@@ -193,6 +222,7 @@ namespace SoulRender
             TryLoadComputeShader(m_SubsurfaceScatteringDownsampleCSProperty, packageShadersPath + "SubsurfaceScatteringDownsample.compute", "SSS Downsample");
             TryLoadComputeShader(m_ResolveStencilCSProperty, packageShadersPath + "ResolveStencilBuffer.compute", "Resolve Stencil");
             TryLoadShader(m_CombineLightingShaderProperty, packageShadersPath + "CombineLighting.shader", "Combine Lighting");
+            TryLoadComputeShader(m_SubsurfaceScatteringSeparableCSProperty, packageShadersPath + "SubsurfaceScatteringSeparable.compute", "SSS Separable Filter");
         }
         
         /// <summary>
@@ -230,10 +260,15 @@ namespace SoulRender
         /// </summary>
         private bool HasMissingShaders()
         {
-            return m_SubsurfaceScatteringCSProperty.objectReferenceValue == null || 
-                   m_SubsurfaceScatteringDownsampleCSProperty.objectReferenceValue == null || 
-                   m_ResolveStencilCSProperty.objectReferenceValue == null ||
-                   m_CombineLightingShaderProperty.objectReferenceValue == null;
+            bool coreShadersMissing = m_SubsurfaceScatteringCSProperty.objectReferenceValue == null || 
+                                      m_SubsurfaceScatteringDownsampleCSProperty.objectReferenceValue == null || 
+                                      m_ResolveStencilCSProperty.objectReferenceValue == null ||
+                                      m_CombineLightingShaderProperty.objectReferenceValue == null;
+
+            bool isSeparable = m_FilterModeProperty.enumValueIndex == (int)SubsurfaceScattering.SSSFilterMode.SeparableFilter;
+            bool separableMissing = isSeparable && m_SubsurfaceScatteringSeparableCSProperty.objectReferenceValue == null;
+
+            return coreShadersMissing || separableMissing;
         }
 
         /// <summary>

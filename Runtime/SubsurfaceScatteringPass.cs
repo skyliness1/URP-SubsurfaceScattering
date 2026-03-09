@@ -51,6 +51,15 @@ namespace SoulRender
         private int m_SubsurfaceScatteringDownsampleKernel;
         private int m_ResolveStencilKernel;
 
+        // Separable filter
+        private ComputeShader m_SubsurfaceScatteringSeparableCS;
+        private int m_SSSFilterHorizontalKernel;
+        private int m_SSSFilterVerticalKernel;
+        private SubsurfaceScattering.SSSFilterMode m_FilterMode;
+        private int m_SeparableKernelSize;
+        private Vector4[] m_SSSKernelData;
+        private bool m_KernelDirty = true;
+
         // Quality settings
         private int m_SampleBudget;
         private int m_DownsampleSteps;
@@ -99,7 +108,10 @@ namespace SoulRender
             int sampleBudget,
             int downsampleSteps,
             bool subsurfaceScatteringAttenuation,
-            float globalDetailPreservation)
+            float globalDetailPreservation,
+            SubsurfaceScattering.SSSFilterMode filterMode = SubsurfaceScattering.SSSFilterMode.DiskSampling,
+            ComputeShader subsurfaceScatteringSeparableCS = null,
+            int separableKernelSize = 11)
         {
             m_DiffusionProfiles = diffusionProfiles ?? new DiffusionProfileSettings[0];
             m_LayerMask = layerMask == 0 ? -1 : layerMask;
@@ -114,6 +126,12 @@ namespace SoulRender
             m_SubsurfaceScatteringAttenuation = subsurfaceScatteringAttenuation;
             
             m_globalDetailPreservation = globalDetailPreservation;
+
+            // Separable filter settings
+            m_FilterMode = filterMode;
+            m_SubsurfaceScatteringSeparableCS = subsurfaceScatteringSeparableCS;
+            m_SeparableKernelSize = Mathf.Clamp(separableKernelSize, 3, 25);
+            m_KernelDirty = true;
 
             // Create combine lighting material (HDRP-style)
             if (combineLightingShader != null)
@@ -137,6 +155,12 @@ namespace SoulRender
             if (m_ResolveStencilCS != null)
             {
                 m_ResolveStencilKernel = m_ResolveStencilCS.FindKernel("Main");
+            }
+
+            if (m_SubsurfaceScatteringSeparableCS != null)
+            {
+                m_SSSFilterHorizontalKernel = m_SubsurfaceScatteringSeparableCS.FindKernel("SSSFilterHorizontal");
+                m_SSSFilterVerticalKernel   = m_SubsurfaceScatteringSeparableCS.FindKernel("SSSFilterVertical");
             }
 
             // Initialize data arrays
@@ -195,6 +219,40 @@ namespace SoulRender
             
             // Push to GPU
             PushGlobalParams();
+
+            // Recompute separable kernel if needed
+            if (m_FilterMode == SubsurfaceScattering.SSSFilterMode.SeparableFilter && m_KernelDirty)
+            {
+                UpdateSeparableKernel();
+            }
+        }
+
+        /// <summary>
+        /// Precompute the separable Burley kernel using SSSKernelUtility.
+        /// Chooses the profile with the largest filterRadius (or profile 0 as fallback).
+        /// </summary>
+        private void UpdateSeparableKernel()
+        {
+            // Pick the profile with the largest filter radius
+            int bestProfile = 0;
+            float bestRadius = -1f;
+            for (int i = 0; i < m_ActiveDiffusionProfileCount; i++)
+            {
+                float r = m_WorldScalesAndFilterRadiiAndThicknessRemaps[i].y;
+                if (r > bestRadius)
+                {
+                    bestRadius = r;
+                    bestProfile = i;
+                }
+            }
+
+            m_SSSKernelData = SSSKernelUtility.ComputeSeparableKernel(
+                m_ShapeParamsAndMaxScatterDists,
+                m_WorldScalesAndFilterRadiiAndThicknessRemaps,
+                bestProfile,
+                m_SeparableKernelSize);
+
+            m_KernelDirty = false;
         }
 
         /// <summary>
@@ -232,6 +290,7 @@ namespace SoulRender
 
             m_SetDiffusionProfiles[index] = settings;
             m_DiffusionProfileUpdate[index] = settings.updateCount;
+            m_KernelDirty = true; // Profile changed, separable kernel needs recompute
         }
 
         /// <summary>
