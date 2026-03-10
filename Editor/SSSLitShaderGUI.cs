@@ -273,6 +273,7 @@ namespace SoulRender
             public static readonly string Smoothness = "_Smoothness";
             public static readonly string OcclusionStrength = "_OcclusionStrength";
             public static readonly string baseLayerSubsurfaceScattering = "_BaseLayerSubsurfaceScattering";
+            public static readonly string Layer1NormalTilingOffset = "_Layer1NormalTilingOffset";
         }
         
         public static class ParallaxDetailShaderIDs
@@ -577,6 +578,7 @@ namespace SoulRender
             public MaterialProperty smoothness;
             public MaterialProperty occlusionStrength;
             public MaterialProperty baseLayerSubsurfaceScattering;
+            public MaterialProperty layer1NormalTilingOffset;
 
             public SurfaceInputProperties(MaterialProperty[] properties)
             {
@@ -586,6 +588,7 @@ namespace SoulRender
                 smoothness = BaseShaderGUI.FindProperty(SurfaceInputShaderIDs.Smoothness, properties, false);
                 occlusionStrength = BaseShaderGUI.FindProperty(SurfaceInputShaderIDs.OcclusionStrength, properties, false);
                 baseLayerSubsurfaceScattering = BaseShaderGUI.FindProperty(SurfaceInputShaderIDs.baseLayerSubsurfaceScattering, properties, false);
+                layer1NormalTilingOffset = BaseShaderGUI.FindProperty(SurfaceInputShaderIDs.Layer1NormalTilingOffset, properties, false);
             }
         }
 
@@ -622,11 +625,21 @@ namespace SoulRender
             // Draw MAHS Map section
             DrawMAHSMapSection(material);
             
-            // Draw normal map
+            EditorGUILayout.Space(5);
+            
+            // Draw normal maps
             BaseShaderGUI.DrawNormalArea(materialEditor, litProperties.bumpMapProp, litProperties.bumpScaleProp);
+
+            if (surfaceInputProperties.layer1NormalTilingOffset != null)
+            {
+                materialEditor.ShaderProperty(surfaceInputProperties.layer1NormalTilingOffset, new GUIContent("基础层法线 Tiling Offset"));
+            }
             
             DrawEmissionProperties(material, true);
-            DrawTileOffset(materialEditor, baseMapProp);
+            
+            //EditorGUILayout.Space(5);
+            
+            //DrawTileOffset(materialEditor, baseMapProp);
         }
 
         private void DrawMAHSMapSection(Material material)

@@ -60,70 +60,75 @@ namespace SoulRender
             RenderingUtils.ReAllocateIfNeeded(ref m_SSSBufferRT, sssBufferDesc, FilterMode.Point, 
                 TextureWrapMode.Clamp, name: SSSShaderIDs.SSSBufferTextureName);
 
-            // Filtering buffer (no MSAA, used for compute output)
+            // Filtering buffer (no MSAA, used for compute output or 4S separable output)
             var filteringDesc = cameraDescriptor;
             filteringDesc.graphicsFormat = GraphicsFormat.B10G11R11_UFloatPack32;
             filteringDesc.depthBufferBits = 0;
-            filteringDesc.msaaSamples = 1; // No MSAA for compute shader output
-            filteringDesc.enableRandomWrite = true;
+            filteringDesc.msaaSamples = 1; // No MSAA for compute/separable output
+            filteringDesc.enableRandomWrite = !m_useSeparableSSS; // Only need random write for 5S compute
             filteringDesc.useDynamicScale = false;
             RenderingUtils.ReAllocateIfNeeded(ref m_FilteringRT, filteringDesc, FilterMode.Bilinear, 
                 TextureWrapMode.Clamp, name: SSSShaderIDs.SSSFilteringTextureName);
 
-            // Downsample buffer (if needed)
-            if (m_DownsampleSteps > 0)
+            // The following resources are only needed for the 5S compute path
+            if (!m_useSeparableSSS)
             {
-                float scale = 1.0f / (1u << m_DownsampleSteps);
-                int downsampleWidth = Mathf.Max(1, (int)(width * scale));
-                int downsampleHeight = Mathf.Max(1, (int)(height * scale));
+                // Downsample buffer (if needed)
+                if (m_DownsampleSteps > 0)
+                {
+                    float scale = 1.0f / (1u << m_DownsampleSteps);
+                    int downsampleWidth = Mathf.Max(1, (int) (width * scale));
+                    int downsampleHeight = Mathf.Max(1, (int) (height * scale));
 
-                var downsampleDesc = cameraDescriptor;
-                downsampleDesc.width = downsampleWidth;
-                downsampleDesc.height = downsampleHeight;
-                downsampleDesc.graphicsFormat = GraphicsFormat.B10G11R11_UFloatPack32;
-                downsampleDesc.depthBufferBits = 0;
-                downsampleDesc.msaaSamples = 1;
-                downsampleDesc.enableRandomWrite = true;
-                downsampleDesc.useDynamicScale = false;
-                RenderingUtils.ReAllocateIfNeeded(ref m_DownsampleRT, downsampleDesc, FilterMode.Bilinear, 
-                    TextureWrapMode.Clamp, name: SSSShaderIDs.SSSDownsampledTextureName);
-            }
+                    var downsampleDesc = cameraDescriptor;
+                    downsampleDesc.width = downsampleWidth;
+                    downsampleDesc.height = downsampleHeight;
+                    downsampleDesc.graphicsFormat = GraphicsFormat.B10G11R11_UFloatPack32;
+                    downsampleDesc.depthBufferBits = 0;
+                    downsampleDesc.msaaSamples = 1;
+                    downsampleDesc.enableRandomWrite = true;
+                    downsampleDesc.useDynamicScale = false;
+                    RenderingUtils.ReAllocateIfNeeded(ref m_DownsampleRT, downsampleDesc, FilterMode.Bilinear,
+                        TextureWrapMode.Clamp, name: SSSShaderIDs.SSSDownsampledTextureName);
+                }
 
-            // Diffusion profile index texture (if occlusion is enabled)
-            if (m_SubsurfaceScatteringAttenuation)
-            {
-                var profileIndexDesc = cameraDescriptor;
-                profileIndexDesc.width = Mathf.Max(1, width / 2);
-                profileIndexDesc.height = height;
-                profileIndexDesc.graphicsFormat = GraphicsFormat.R8_UInt;
-                profileIndexDesc.depthBufferBits = 0;
-                profileIndexDesc.msaaSamples = 1;
-                profileIndexDesc.enableRandomWrite = true;
-                profileIndexDesc.useDynamicScale = false;
-                RenderingUtils.ReAllocateIfNeeded(ref m_DiffusionProfileIndexRT, profileIndexDesc, FilterMode.Point, 
-                    TextureWrapMode.Clamp, name: SSSShaderIDs.SSSProfileIndexTextureName);
-            }
+                // Diffusion profile index texture (if occlusion is enabled)
+                if (m_SubsurfaceScatteringAttenuation)
+                {
+                    var profileIndexDesc = cameraDescriptor;
+                    profileIndexDesc.width = Mathf.Max(1, width / 2);
+                    profileIndexDesc.height = height;
+                    profileIndexDesc.graphicsFormat = GraphicsFormat.R8_UInt;
+                    profileIndexDesc.depthBufferBits = 0;
+                    profileIndexDesc.msaaSamples = 1;
+                    profileIndexDesc.enableRandomWrite = true;
+                    profileIndexDesc.useDynamicScale = false;
+                    RenderingUtils.ReAllocateIfNeeded(ref m_DiffusionProfileIndexRT, profileIndexDesc, FilterMode.Point,
+                        TextureWrapMode.Clamp, name: SSSShaderIDs.SSSProfileIndexTextureName);
+                }
 
-            // Resolved stencil and depth buffers (if MSAA is enabled)
-            if (msaaSamples > 1)
-            {
-                var resolvedStencilDesc = cameraDescriptor;
-                resolvedStencilDesc.graphicsFormat = GraphicsFormat.R8G8_UInt;
-                resolvedStencilDesc.depthBufferBits = 0;
-                resolvedStencilDesc.msaaSamples = 1;
-                resolvedStencilDesc.enableRandomWrite = true;
-                resolvedStencilDesc.useDynamicScale = false;
-                RenderingUtils.ReAllocateIfNeeded(ref m_ResolvedStencilRT, resolvedStencilDesc, FilterMode.Point, 
-                    TextureWrapMode.Clamp, name: "StencilBufferResolved");
+                // Resolved stencil and depth buffers (if MSAA is enabled)
+                // Resolved stencil and depth buffers (if MSAA is enabled)
+                if (msaaSamples > 1)
+                {
+                    var resolvedStencilDesc = cameraDescriptor;
+                    resolvedStencilDesc.graphicsFormat = GraphicsFormat.R8G8_UInt;
+                    resolvedStencilDesc.depthBufferBits = 0;
+                    resolvedStencilDesc.msaaSamples = 1;
+                    resolvedStencilDesc.enableRandomWrite = true;
+                    resolvedStencilDesc.useDynamicScale = false;
+                    RenderingUtils.ReAllocateIfNeeded(ref m_ResolvedStencilRT, resolvedStencilDesc, FilterMode.Point,
+                        TextureWrapMode.Clamp, name: "StencilBufferResolved");
 
-                var resolvedDepthDesc = cameraDescriptor;
-                resolvedDepthDesc.graphicsFormat = GraphicsFormat.R32_SFloat;
-                resolvedDepthDesc.depthBufferBits = 0;
-                resolvedDepthDesc.msaaSamples = 1;
-                resolvedDepthDesc.enableRandomWrite = true;
-                resolvedDepthDesc.useDynamicScale = false;
-                RenderingUtils.ReAllocateIfNeeded(ref m_ResolvedDepthRT, resolvedDepthDesc, FilterMode.Point, 
-                    TextureWrapMode.Clamp, name: "DepthBufferResolved");
+                    var resolvedDepthDesc = cameraDescriptor;
+                    resolvedDepthDesc.graphicsFormat = GraphicsFormat.R32_SFloat;
+                    resolvedDepthDesc.depthBufferBits = 0;
+                    resolvedDepthDesc.msaaSamples = 1;
+                    resolvedDepthDesc.enableRandomWrite = true;
+                    resolvedDepthDesc.useDynamicScale = false;
+                    RenderingUtils.ReAllocateIfNeeded(ref m_ResolvedDepthRT, resolvedDepthDesc, FilterMode.Point,
+                        TextureWrapMode.Clamp, name: "DepthBufferResolved");
+                }
             }
         }
 
@@ -143,20 +148,32 @@ namespace SoulRender
                 // Get view count for VR support
                 int viewCount = cameraData.xr.enabled ? cameraData.xr.viewCount : 1;
 
-                // Step 1: Render SSS Buffer MRT pass
+                // Step 1: Render SSS Buffer MRT pass (shared between 5S and 4S)
                 ExecuteRenderSSSBuffer(cmd, context, ref renderingData);
 
-                // Step 2: Build coarse stencil and resolve MSAA if needed
-                RTHandle depthTextureForSSS = GetDepthTextureHandle(ref renderingData);
-                Vector4 coarseStencilBufferSize;
-                ExecuteBuildCoarseStencilAndResolve(cmd, depthTextureForSSS, cameraDescriptor, viewCount, 
-                    out coarseStencilBufferSize, out depthTextureForSSS);
+                if (m_useSeparableSSS)
+                {
+                    // === 4S Separable Path ===
+                    // Step 2: Apply separable horizontal+vertical blur on diffuse lighting
+                    ExecuteSeparableSSSFiltering(cmd, ref renderingData);
+                    // Step 3: Combine lighting (add filtered diffuse to color buffer)
+                    ExecuteCombineLighting(cmd, ref renderingData);
+                }
+                else
+                {
+                    // === 5S Compute Path (original) ===
+                    // Step 2: Build coarse stencil and resolve MSAA if needed
+                    RTHandle depthTextureForSSS = GetDepthTextureHandle(ref renderingData);
+                    Vector4 coarseStencilBufferSize;
+                    ExecuteBuildCoarseStencilAndResolve(cmd, depthTextureForSSS, cameraDescriptor, viewCount, 
+                        out coarseStencilBufferSize, out depthTextureForSSS);
 
-                // Step 3: Execute SSS filtering
-                ExecuteSSSFiltering(cmd, cameraDescriptor, depthTextureForSSS, coarseStencilBufferSize, viewCount);
+                    // Step 3: Execute SSS filtering
+                    ExecuteSSSFiltering(cmd, cameraDescriptor, depthTextureForSSS, coarseStencilBufferSize, viewCount);
 
-                // Step 4: Combine lighting (add filtered diffuse to color buffer)
-                ExecuteCombineLighting(cmd, ref renderingData);
+                    // Step 4: Combine lighting (add filtered diffuse to color buffer)
+                    ExecuteCombineLighting(cmd, ref renderingData);
+                }
             }
 
             context.ExecuteCommandBuffer(cmd);
@@ -447,6 +464,8 @@ namespace SoulRender
             m_ResolvedStencilRT = null;
             m_ResolvedDepthRT = null;
             m_CoarseStencilBuffer = null;
+            
+            DisposeSeparableLegacy();
         }
     }
 }

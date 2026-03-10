@@ -55,6 +55,7 @@ Shader "Universal Render Pipeline/SSSLit"
         [NoScaleOffset]
         _BumpMap                    ("     Normal Map", 2D) = "bump" {}
         _BumpScale                  ("     Normal Scale", Float) = 1.0
+        _Layer1NormalTilingOffset   ("Layer 1 Normal Tiling/Offset", Vector) = (1,1,0,0)
 
         _OcclusionStrength          ("Occlusion Strength", Range(0.0, 1.0)) = 1.0
 

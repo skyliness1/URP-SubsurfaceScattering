@@ -33,6 +33,8 @@ CBUFFER_START(UnityPerMaterial)
     float _DiffusionProfileHash;
     float _BaseLayerSubsurfaceScattering;
 
+    half4 _Layer1NormalTilingOffset;
+
     half _ThicknessRange;
     half _ThicknessPower;
 

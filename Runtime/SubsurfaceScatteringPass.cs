@@ -99,7 +99,12 @@ namespace SoulRender
             int sampleBudget,
             int downsampleSteps,
             bool subsurfaceScatteringAttenuation,
-            float globalDetailPreservation)
+            float globalDetailPreservation,
+            SSSMode sssMode = SSSMode.FiveS,
+            Shader separableSSSShader = null,
+            float separableWidth = 0.3f,
+            float separableDepthFalloff = 1.0f,
+            bool separableFollowSurface = true)
         {
             m_DiffusionProfiles = diffusionProfiles ?? new DiffusionProfileSettings[0];
             m_LayerMask = layerMask == 0 ? -1 : layerMask;
@@ -155,6 +160,10 @@ namespace SoulRender
             // Setup rendering
             RenderQueueRange renderQueueRange = RenderQueueRange.opaque;
             m_FilteringSettings = new FilteringSettings(renderQueueRange, m_LayerMask);
+            
+            // Initialize 4S separable SSS path
+            InitializeSeparableSSS(separableSSSShader, sssMode == SSSMode.FourS,
+                separableWidth, separableDepthFalloff, separableFollowSurface);
         }
 
         /// <summary>
@@ -165,6 +174,7 @@ namespace SoulRender
             CoreUtils.Destroy(m_CombineLightingMaterial);
             m_CombineLightingMaterial = null;
             
+            CleanupSeparableSSS();
             DisposeLegacy();
         }
 

@@ -203,6 +203,7 @@ inline void InitializeStandardSSSLitSurfaceData(
 {
     // Base Layer
     half2 baseUV = uv * _BaseMap_ST.xy + _BaseMap_ST.zw;
+    half2 baseNormalUV = uv * _Layer1NormalTilingOffset.xy + _Layer1NormalTilingOffset.zw;
     half4 albedoAlpha = SampleAlbedoAlpha(baseUV, TEXTURE2D_ARGS(_BaseMap, sampler_BaseMap));
     outSurfaceData.alpha = Alpha(albedoAlpha.a, _BaseColor, _Cutoff);
     
@@ -212,7 +213,7 @@ inline void InitializeStandardSSSLitSurfaceData(
     // Sample base MAHS
     MAHSData baseMAHS = SampleBaseMAHS(baseUV);
     
-    half3 baseNormalTS = SampleNormal(baseUV, TEXTURE2D_ARGS(_BumpMap, sampler_BumpMap), _BumpScale);
+    half3 baseNormalTS = SampleNormal(baseNormalUV, TEXTURE2D_ARGS(_BumpMap, sampler_BumpMap), _BumpScale);
     
     // Initialize with base layer values
     half3 finalAlbedo = baseAlbedo;
