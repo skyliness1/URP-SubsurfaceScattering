@@ -265,7 +265,11 @@ void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
             specBRDF = SingleSpecularGGX_SSS(brdfData.specular, SpecContext, clampedNdotL, brdfData.roughness);
         #endif
 
-        // Compute EnvBRDFApprox ONCE - derive both energy conservation and preservation
+        // Compute EnvBRDFApprox ONCE - derive both energy conservation and preservation.
+        // Equivalent to calling ComputeEnergyConservation_SSS + ComputeEnergyPreservation_SSS
+        // separately, but avoids the redundant second EnvBRDFApprox_SSS evaluation.
+        // energyConservation = multiScatterCompensation = 1 + F0 * (1/reflectance - 1), clamped to 2
+        // energyPreservation = 1 - reflectance  (computed after this block)
         specReflectance = EnvBRDFApprox_SSS(brdfData.specular, energyPreservationRoughness, clampedNoV);
         half3 energyConservation = min(1.0 + brdfData.specular * (rcp(max(specReflectance, 0.001)) - 1.0), 2.0);
         specular = specBRDF * energyConservation * radianceR;

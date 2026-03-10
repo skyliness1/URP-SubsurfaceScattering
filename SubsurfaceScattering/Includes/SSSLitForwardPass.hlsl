@@ -444,6 +444,8 @@ void SSSBufferFragment(
     half3 viewDirTS_detail = TransformWorldToTangent(input.viewDirWS, TBN);
     viewDirTS_detail = normalize(viewDirTS_detail);
 #else
+    // Dummy value — InitializeStandardSSSLitSurfaceData requires this parameter
+    // but only uses it inside #if defined(_USE_PARALLAX_DETAIL).
     half3 viewDirTS_detail = half3(0, 0, 1);
 #endif
 
