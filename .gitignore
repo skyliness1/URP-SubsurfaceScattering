@@ -1,0 +1,5 @@
+# Unity .meta files
+*.meta
+
+# Reference implementation folder
+Refer/
