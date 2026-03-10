@@ -228,96 +228,10 @@ int GetDiffusionProfileIndexAtPosition(int2 position)
     return sampleProfileIndex;
 }
 
-void EvaluateSample(uint i, uint n, int2 pixelCoord, int2 cacheOffset,
-                    float3 S, float d, float3 centerPosVS, float mmPerUnit, float pixelsPerMm,
-                    float phase, float3 tangentX, float3 tangentY, float4x4 projMatrix, float linearDepth,
-                    int currentProfileIndex, float3 borderAttenuationColor, inout DebugInfo debugInfo,
-                    inout float3 totalIrradiance, inout float3 totalWeight)
-{
-    // The sample count is loop-invariant.
-    const float scale  = rcp(n);
-    const float offset = rcp(n) * 0.5;
-
-    // The phase angle is loop-invariant.
-    float sinPhase, cosPhase;
-    sincos(phase, sinPhase, cosPhase);
-
-    float r, rcpPdf;
-    SampleBurleyDiffusionProfile(i * scale + offset, d, r, rcpPdf);
-
-    float phi = SampleDiskGolden(i, n).y;
-    float sinPhi, cosPhi;
-    sincos(phi, sinPhi, cosPhi);
-
-    float sinPsi = cosPhase * sinPhi + sinPhase * cosPhi; // sin(phase + phi)
-    float cosPsi = cosPhase * cosPhi - sinPhase * sinPhi; // cos(phase + phi)
-
-    float2 vec = r * float2(cosPsi, sinPsi);
-
-    // Compute the screen-space position and the squared distance (in mm) in the image plane.
-    int2 position; float xy2;
-
-    #if SSS_USE_TANGENT_PLANE
-        float3 relPosVS   = vec.x * tangentX + vec.y * tangentY;
-        float3 positionVS = centerPosVS + relPosVS;
-        float2 positionNDC = ComputeNormalizedDeviceCoordinates(positionVS, projMatrix);
-
-        position = (int2)(positionNDC * _ScreenSize.xy);
-        xy2      = dot(relPosVS.xy, relPosVS.xy);
-    #else
-        // floor((pixelCoord + 0.5) + vec * pixelsPerMm)
-        // position = pixelCoord + floor(0.5 + vec * pixelsPerMm);
-        // position = pixelCoord + round(vec * pixelsPerMm);
-        // Note that (int) truncates towards 0, while floor() truncates towards -Inf!
-        position = pixelCoord + (int2)round((pixelsPerMm * r) * float2(cosPsi, sinPsi));
-        xy2      = r * r;
-    #endif
-
-    float4 textureSample = LoadSample(position, cacheOffset);
-    float3 irradiance    = textureSample.rgb;
-
-    // Compute bilateral weighting.
-    float  viewZ  = textureSample.a;
-    float  relZ   = viewZ - linearDepth;
-    float3 weight = ComputeBilateralWeight(xy2, relZ, mmPerUnit, S, rcpPdf);
-
-    // For the SSS Occlusion, we take in account all the samples as weight
-    // This is required if we want darkening on zones where less samples are available due to masking.
-    #if USE_SSS_OCCLUSION
-    totalWeight     += weight;
-    #endif
-
-    // Check the results of the stencil test.
-    if (TestLightingForSSS(irradiance))
-    {
-        int sampleProfileIndex = GetDiffusionProfileIndexAtPosition(position);
-        if (SameProfiles(sampleProfileIndex, currentProfileIndex))
-        {
-            // Note: if the texture sample if off-screen, (z = 0) -> (viewZ = far) -> (weight ≈ 0).
-            totalIrradiance += weight * irradiance;
-            #if !USE_SSS_OCCLUSION
-            totalWeight     += weight;
-            #endif
-        }
-        else
-        {
-            totalIrradiance += weight * irradiance * borderAttenuationColor;
-        }
-    }
-    else
-    {
-        // The irradiance is 0. This could happen for 2 reasons.
-        // Most likely, the surface fragment does not have an SSS material.
-        // Alternatively, our sample comes from a region without any geometry.
-        // Our blur is energy-preserving, so 'centerWeight' should be set to 0.
-        // We do not terminate the loop since we want to gather the contribution
-        // of the remaining samples (e.g. in case of hair covering skin).
-    }
-
-#if SSS_DEBUG_PATTERN
-    debugInfo.testCoordHit = debugInfo.testCoordHit || all(debugInfo.testCoord == position);
-#endif
-}
+// EvaluateSample is intentionally NOT a separate function.
+// The body is inlined into the sampling loop in EvaluateSss to allow the compiler to
+// hoist loop-invariant computations (sincos, rcp) and avoid the overhead of passing 16+
+// parameters per iteration. This is the primary 5S performance optimization.
 
 void StoreResult(uint2 pixelCoord, float3 irradiance)
 {
@@ -448,14 +362,79 @@ void EvaluateSss(uint2 pixelCoord, CacheInfo cacheInfo, CenterInfo centerInfo, i
     float3 totalIrradiance = 0;
     float3 totalWeight = 0;
 
+    // === Loop-invariant computations hoisted outside the sample loop ===
+    // Previously these were redundantly computed inside EvaluateSample every iteration.
+    float sinPhase, cosPhase;
+    sincos(phase, sinPhase, cosPhase);
+
+    const float scale  = rcp(n);
+    const float offset = rcp(n) * 0.5;
+
     float linearDepth = LinearEyeDepth(centerInfo.depth, _ZBufferParams);
+
+    // === Inlined sample loop (was EvaluateSample function call) ===
+    // Inlining eliminates per-call overhead of passing 16+ parameters and allows
+    // the compiler to keep loop-invariant values in registers across iterations.
+    [loop]
     for (uint i = 0; i < n; i++)
     {
-        // Integrate over the image or tangent plane in the view space.
-        EvaluateSample(i, n, pixelCoord, cacheInfo.cacheOffset,
-            S, d, centerPosVS, mmPerUnit, pixelsPerMm,
-            phase, tangentX, tangentY, projMatrix, linearDepth, profileIndex,
-            borderAttenuationColor, debugInfo, totalIrradiance, totalWeight);
+        float r, rcpPdf;
+        SampleBurleyDiffusionProfile(i * scale + offset, d, r, rcpPdf);
+
+        float phi = SampleDiskGolden(i, n).y;
+        float sinPhi, cosPhi;
+        sincos(phi, sinPhi, cosPhi);
+
+        float sinPsi = cosPhase * sinPhi + sinPhase * cosPhi; // sin(phase + phi)
+        float cosPsi = cosPhase * cosPhi - sinPhase * sinPhi; // cos(phase + phi)
+
+        // Compute the screen-space position and the squared distance (in mm) in the image plane.
+        int2 position; float xy2;
+
+    #if SSS_USE_TANGENT_PLANE
+        float3 relPosVS   = r * (cosPsi * tangentX + sinPsi * tangentY);
+        float3 positionVS = centerPosVS + relPosVS;
+        float2 sampleNDC  = ComputeNormalizedDeviceCoordinates(positionVS, projMatrix);
+
+        position = (int2)(sampleNDC * _ScreenSize.xy);
+        xy2      = dot(relPosVS.xy, relPosVS.xy);
+    #else
+        position = pixelCoord + (int2)round((pixelsPerMm * r) * float2(cosPsi, sinPsi));
+        xy2      = r * r;
+    #endif
+
+        float4 textureSample = LoadSample(position, cacheInfo.cacheOffset);
+        float3 sampleIrradiance = textureSample.rgb;
+
+        // Compute bilateral weighting.
+        float  viewZ  = textureSample.a;
+        float  relZ   = viewZ - linearDepth;
+        float3 weight = ComputeBilateralWeight(xy2, relZ, mmPerUnit, S, rcpPdf);
+
+    #if USE_SSS_OCCLUSION
+        totalWeight += weight;
+    #endif
+
+        // Check the results of the stencil test.
+        if (TestLightingForSSS(sampleIrradiance))
+        {
+            int sampleProfileIndex = GetDiffusionProfileIndexAtPosition(position);
+            if (SameProfiles(sampleProfileIndex, profileIndex))
+            {
+                totalIrradiance += weight * sampleIrradiance;
+            #if !USE_SSS_OCCLUSION
+                totalWeight     += weight;
+            #endif
+            }
+            else
+            {
+                totalIrradiance += weight * sampleIrradiance * borderAttenuationColor;
+            }
+        }
+
+    #if SSS_DEBUG_PATTERN
+        debugInfo.testCoordHit = debugInfo.testCoordHit || all(debugInfo.testCoord == position);
+    #endif
     }
 
     // Total weight is 0 for color channels without scattering.
