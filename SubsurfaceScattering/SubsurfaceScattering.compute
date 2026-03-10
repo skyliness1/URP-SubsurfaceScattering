@@ -154,7 +154,8 @@ float4 LoadSample(int2 pixelCoord, int2 cacheOffset)
 
 // Computes f(r, s)/p(r, s), s.t. r = sqrt(xy^2 + z^2).
 // Rescaling of the PDF is handled by 'totalWeight'.
-float3 ComputeBilateralWeight(float xy2, float z, float mmPerUnit, float3 S, float rcpPdf)
+// 'Sscaled' = S * rcp(8 * PI), precomputed once per pixel to avoid redundant per-sample multiply.
+float3 ComputeBilateralWeight(float xy2, float z, float mmPerUnit, float3 S, float3 Sscaled, float rcpPdf)
 {
 #if (SSS_BILATERAL_FILTER == 0)
     z = 0;
@@ -180,10 +181,14 @@ float3 ComputeBilateralWeight(float xy2, float z, float mmPerUnit, float3 S, flo
     area *= r / p;
 #endif
 
+    // Inlined EvalBurleyDiffusionProfile using precomputed Sscaled = S * rcp(8 * PI)
+    float3 exp_13 = exp2(((LOG2_E * (-1.0/3.0)) * r) * S); // Exp[-S * r / 3]
+    float3 expSum = exp_13 * (1 + exp_13 * exp_13);         // Exp[-S * r / 3] + Exp[-S * r]
+
 #if SSS_CLAMP_ARTIFACT
-    return saturate(EvalBurleyDiffusionProfile(r, S) * area);
+    return saturate(Sscaled * expSum * area);
 #else
-    return EvalBurleyDiffusionProfile(r, S) * area;
+    return Sscaled * expSum * area;
 #endif
 }
 
@@ -228,20 +233,13 @@ int GetDiffusionProfileIndexAtPosition(int2 position)
     return sampleProfileIndex;
 }
 
-void EvaluateSample(uint i, uint n, int2 pixelCoord, int2 cacheOffset,
-                    float3 S, float d, float3 centerPosVS, float mmPerUnit, float pixelsPerMm,
-                    float phase, float3 tangentX, float3 tangentY, float4x4 projMatrix, float linearDepth,
+void EvaluateSample(uint i, uint n, float scale, float offset, float sinPhase, float cosPhase,
+                    int2 pixelCoord, int2 cacheOffset,
+                    float3 S, float3 Sscaled, float d, float3 centerPosVS, float mmPerUnit, float pixelsPerMm,
+                    float3 tangentX, float3 tangentY, float4x4 projMatrix, float linearDepth,
                     int currentProfileIndex, float3 borderAttenuationColor, inout DebugInfo debugInfo,
                     inout float3 totalIrradiance, inout float3 totalWeight)
 {
-    // The sample count is loop-invariant.
-    const float scale  = rcp(n);
-    const float offset = rcp(n) * 0.5;
-
-    // The phase angle is loop-invariant.
-    float sinPhase, cosPhase;
-    sincos(phase, sinPhase, cosPhase);
-
     float r, rcpPdf;
     SampleBurleyDiffusionProfile(i * scale + offset, d, r, rcpPdf);
 
@@ -279,7 +277,7 @@ void EvaluateSample(uint i, uint n, int2 pixelCoord, int2 cacheOffset,
     // Compute bilateral weighting.
     float  viewZ  = textureSample.a;
     float  relZ   = viewZ - linearDepth;
-    float3 weight = ComputeBilateralWeight(xy2, relZ, mmPerUnit, S, rcpPdf);
+    float3 weight = ComputeBilateralWeight(xy2, relZ, mmPerUnit, S, Sscaled, rcpPdf);
 
     // For the SSS Occlusion, we take in account all the samples as weight
     // This is required if we want darkening on zones where less samples are available due to masking.
@@ -290,19 +288,23 @@ void EvaluateSample(uint i, uint n, int2 pixelCoord, int2 cacheOffset,
     // Check the results of the stencil test.
     if (TestLightingForSSS(irradiance))
     {
+    #ifdef USE_SSS_OCCLUSION
         int sampleProfileIndex = GetDiffusionProfileIndexAtPosition(position);
         if (SameProfiles(sampleProfileIndex, currentProfileIndex))
         {
             // Note: if the texture sample if off-screen, (z = 0) -> (viewZ = far) -> (weight ≈ 0).
             totalIrradiance += weight * irradiance;
-            #if !USE_SSS_OCCLUSION
-            totalWeight     += weight;
-            #endif
         }
         else
         {
             totalIrradiance += weight * irradiance * borderAttenuationColor;
         }
+    #else
+        // Without occlusion, all SSS samples are treated as same-profile.
+        // Skip the profile index texture read entirely.
+        totalIrradiance += weight * irradiance;
+        totalWeight     += weight;
+    #endif
     }
     else
     {
@@ -448,13 +450,22 @@ void EvaluateSss(uint2 pixelCoord, CacheInfo cacheInfo, CenterInfo centerInfo, i
     float3 totalIrradiance = 0;
     float3 totalWeight = 0;
 
+    // Precompute loop-invariant values once per pixel (hoisted from EvaluateSample).
+    float scale  = rcp((float)n);
+    float offset = scale * 0.5;
+    float sinPhase, cosPhase;
+    sincos(phase, sinPhase, cosPhase);
+    // Precompute Burley profile scale factor: S * rcp(8 * PI)
+    float3 Sscaled = S * rcp(8 * PI);
+
     float linearDepth = LinearEyeDepth(centerInfo.depth, _ZBufferParams);
-    for (uint i = 0; i < n; i++)
+    [loop] for (uint i = 0; i < n; i++)
     {
         // Integrate over the image or tangent plane in the view space.
-        EvaluateSample(i, n, pixelCoord, cacheInfo.cacheOffset,
-            S, d, centerPosVS, mmPerUnit, pixelsPerMm,
-            phase, tangentX, tangentY, projMatrix, linearDepth, profileIndex,
+        EvaluateSample(i, n, scale, offset, sinPhase, cosPhase,
+            pixelCoord, cacheInfo.cacheOffset,
+            S, Sscaled, d, centerPosVS, mmPerUnit, pixelsPerMm,
+            tangentX, tangentY, projMatrix, linearDepth, profileIndex,
             borderAttenuationColor, debugInfo, totalIrradiance, totalWeight);
     }
 
