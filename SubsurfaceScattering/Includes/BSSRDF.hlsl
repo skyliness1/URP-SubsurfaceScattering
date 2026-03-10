@@ -212,7 +212,9 @@ void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
     #define TRANSMISSION_WRAP_LIGHT 0.2588190451025207701
     half flippedNdotL = ComputeWrappedDiffuseLighting(-NdotL, TRANSMISSION_WRAP_LIGHT);
     
-    half3 radianceR = lightColor * (diffuselightAttenuation * clampedNdotL);
+    // Factor out common light attenuation to avoid redundant per-component multiply
+    half3 lightAtten = lightColor * diffuselightAttenuation;
+    half3 radianceR = lightAtten * clampedNdotL;
     half3 radianceT = lightColor * (transmissionLightAttenuation * flippedNdotL);
     
     // Apply Diffuse Power modification (following HDRP)
@@ -229,6 +231,7 @@ void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
     //=========================================================================
     specular = half3(0, 0, 0);
     half energyPreservationRoughness = brdfData.roughness; // Used for energy calc
+    half3 specReflectance = half3(0, 0, 0);
     
 #ifndef _SPECULARHIGHLIGHTS_OFF
     [branch] if (!specularHighlightsOff)
@@ -236,6 +239,7 @@ void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
         SSSBxDFContext SpecContext = Context;
         SpecContext.NoV = clampedNoV;
         
+        half3 specBRDF;
         #if defined(_USE_DUAL_SPECULAR_LOBE)
             // Get parameters from material properties
             half Lobe0Roughness, Lobe1Roughness, LobeMix;
@@ -251,23 +255,20 @@ void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
             );
             
             half AverageRoughness;
-            half3 specBRDF = DualSpecularGGX_SSS(brdfData.specular, SpecContext, clampedNdotL,
+            specBRDF = DualSpecularGGX_SSS(brdfData.specular, SpecContext, clampedNdotL,
                 Lobe0Roughness, Lobe1Roughness, LobeMix, AverageRoughness);
             
             // Use average roughness for energy conservation
             energyPreservationRoughness = AverageRoughness;
-            
-            // Apply energy conservation to specular
-            half3 energyConservation = ComputeEnergyConservation_SSS(brdfData.specular, AverageRoughness, clampedNoV);
-            specular = specBRDF * energyConservation * radianceR;
         #else
             // Standard single lobe specular
-            half3 specBRDF = SingleSpecularGGX_SSS(brdfData.specular, SpecContext, clampedNdotL, brdfData.roughness);
-            
-            // Apply energy conservation
-            half3 energyConservation = ComputeEnergyConservation_SSS(brdfData.specular, brdfData.roughness, clampedNoV);
-            specular = specBRDF * energyConservation * radianceR;
+            specBRDF = SingleSpecularGGX_SSS(brdfData.specular, SpecContext, clampedNdotL, brdfData.roughness);
         #endif
+
+        // Compute EnvBRDFApprox ONCE - derive both energy conservation and preservation
+        specReflectance = EnvBRDFApprox_SSS(brdfData.specular, energyPreservationRoughness, clampedNoV);
+        half3 energyConservation = min(1.0 + brdfData.specular * (rcp(max(specReflectance, 0.001)) - 1.0), 2.0);
+        specular = specBRDF * energyConservation * radianceR;
 
 #if defined(_CLEARCOAT) || defined(_CLEARCOATMAP)
         half brdfCoat = kDielectricSpec. r * DirectBRDFSpecular(brdfDataClearCoat, normalWS, lightDirectionWS, viewDirectionWS);
@@ -276,13 +277,19 @@ void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
         specular = specular * (1.0 - clearCoatMask * coatFresnel) + brdfCoat * clearCoatMask * radianceR;
 #endif
     }
+    else
+    {
+        specReflectance = EnvBRDFApprox_SSS(brdfData.specular, energyPreservationRoughness, clampedNoV);
+    }
+#else
+    specReflectance = EnvBRDFApprox_SSS(brdfData.specular, energyPreservationRoughness, clampedNoV);
 #endif
 
     //=========================================================================
     // Diffuse Calculation with Energy Preservation
     //=========================================================================
-    // Compute energy preservation (what's left after specular reflection)
-    half3 energyPreservation = ComputeEnergyPreservation_SSS(brdfData.specular, energyPreservationRoughness, clampedNoV);
+    // Derive energy preservation from cached specReflectance (avoids redundant EnvBRDFApprox call)
+    half3 energyPreservation = 1.0 - specReflectance;
     
     half3 diffuseReflection;
     #if defined(_USE_BURLEY_DIFFUSE)
@@ -297,8 +304,8 @@ void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
     // Apply energy preservation to diffuse
     diffuseReflection *= energyPreservation;
     
-    // Diffuse split:  reflection + transmission
-    half3 diffR = diffuseReflection * lightColor * (diffuselightAttenuation * diffuseNdotL);
+    // Diffuse split:  reflection + transmission (reuse pre-computed lightAtten)
+    half3 diffR = diffuseReflection * lightAtten * diffuseNdotL;
     half3 transmissionBxDF = brdfData.diffuse; 
     half3 diffT = transmissionBxDF * radianceT * transmittance;
     diffuse = diffR + diffT;
