@@ -626,8 +626,9 @@ void SSSBufferFragment(
             half3 terrainSatColor = SceneSaturation(terrainTotal);
             terrainTotal = lerp(terrainTotal, terrainSatColor, nDotLForSat);
             
-            half totalLum = max(Luminance(terrainDiffuse) + Luminance(terrainSpecular), 0.001);
-            half diffRatio = Luminance(terrainDiffuse) / totalLum;
+            half diffLum = Luminance(terrainDiffuse);
+            half totalLum = max(diffLum + Luminance(terrainSpecular), 0.001);
+            half diffRatio = diffLum / totalLum;
             terrainDiffuse = terrainTotal * diffRatio;
             terrainSpecular = terrainTotal * (1.0 - diffRatio);
 

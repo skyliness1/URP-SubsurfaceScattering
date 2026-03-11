@@ -56,7 +56,7 @@ half3 F_Schlick_SSS(half3 SpecularColor, half VoH)
 {
     half Fc = Pow5(1.0 - VoH);
     // Anything less than 2% is physically impossible and is instead considered to be shadowing
-    return saturate(50.0 * SpecularColor. g) * Fc + (1.0 - Fc) * SpecularColor;
+    return saturate(50.0 * SpecularColor.g) * Fc + (1.0 - Fc) * SpecularColor;
 }
 
 //=============================================================================
@@ -123,7 +123,7 @@ half3 DualSpecularGGX_SSS(half3 SpecularColor, SSSBxDFContext Context, half NoL,
     half Lobe1Alpha2 = Pow4(Lobe1Roughness);
     
     // Dual lobe NDF - lerp between two D_GGX with different roughnesses
-    half D0 = D_GGX_SSS(Lobe0Alpha2, Context. NoH);
+    half D0 = D_GGX_SSS(Lobe0Alpha2, Context.NoH);
     half D1 = D_GGX_SSS(Lobe1Alpha2, Context.NoH);
     half D = lerp(D0, D1, LobeMix);
     
