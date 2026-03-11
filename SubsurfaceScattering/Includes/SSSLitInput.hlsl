@@ -224,29 +224,32 @@ struct LayerData
     half mask;
 };
 
+// Consolidated layer mask processing - reduces duplicated ALU per layer
+half ProcessLayerMask(half rawMask, half range, half power, half intensity)
+{
+    half maskPow = clamp(10 - range, 0.1, 5.0);
+    half processedMask = pow(saturate(rawMask), maskPow);
+    half sharp = saturate(0.5 - power);
+    half low = 0.5 - sharp;
+    half high = 0.5 + sharp;
+    return smoothstep(low, high, processedMask) * intensity;
+}
+
 // Sample Second Layer
 LayerData SampleSecondLayer(float2 uv)
 {
     LayerData layer = (LayerData)0;
-    half2 layer2UV = uv * _SecondLayerTilingOffset.xy + _SecondLayerTilingOffset.zw;
     
 #if defined(_USE_SECOND_LAYER)
-    // Sample mask
-    layer.mask = SAMPLE_TEXTURE2D(_SecondLayerMaskMap, sampler_LinearClamp, uv).r;
-    half secondMaskPow = clamp(10 - _SecondLayerRange, 0.1, 5.0);
-    layer.mask = pow(saturate(layer.mask), secondMaskPow);
-    half secondMaskSharp = saturate(0.5 - _SecondLayerPower);
-    layer.mask = smoothstep(0.5 - secondMaskSharp, 0.5 + secondMaskSharp, layer.mask);
-    layer.mask *= _SecondLayerIntensity;
+    half2 layer2UV = uv * _SecondLayerTilingOffset.xy + _SecondLayerTilingOffset.zw;
+    half rawMask = SAMPLE_TEXTURE2D(_SecondLayerMaskMap, sampler_LinearClamp, uv).r;
+    layer.mask = ProcessLayerMask(rawMask, _SecondLayerRange, _SecondLayerPower, _SecondLayerIntensity);
     
-    // Sample diffuse
-    half4 diffuse = SAMPLE_TEXTURE2D(_SecondLayerDiffuseMap, sampler_BaseMap, layer2UV);
-    layer.albedo = diffuse.rgb * _SecondLayerDiffuseColor.rgb * _BaseColor.rgb;
+    layer.albedo = SAMPLE_TEXTURE2D(_SecondLayerDiffuseMap, sampler_BaseMap, layer2UV).rgb
+                   * _SecondLayerDiffuseColor.rgb * _BaseColor.rgb;
+    layer.normalTS = UnpackNormalScale(
+        SAMPLE_TEXTURE2D(_SecondLayerNormalMap, sampler_BumpMap, layer2UV), _SecondLayerNormalScale);
     
-    // Sample normal
-    layer.normalTS = UnpackNormalScale(SAMPLE_TEXTURE2D(_SecondLayerNormalMap, sampler_BumpMap, layer2UV), _SecondLayerNormalScale);
-    
-    // Sample MAHS
     half4 mahs = SAMPLE_TEXTURE2D(_SecondLayerMAHSMap, sampler_LinearRepeat, layer2UV);
     layer.metallic = mahs.r * _SecondLayerMetallicScale;
     layer.occlusion = LerpWhiteTo(mahs.g, _SecondLayerOcclusionScale);
@@ -260,25 +263,17 @@ LayerData SampleSecondLayer(float2 uv)
 LayerData SampleThirdLayer(float2 uv)
 {
     LayerData layer = (LayerData)0;
-    half2 layer3UV = uv * _ThirdLayerTilingOffset.xy + _ThirdLayerTilingOffset.zw;
     
 #if defined(_USE_THIRD_LAYER)
-    // Sample mask
-    layer.mask = SAMPLE_TEXTURE2D(_ThirdLayerMaskMap, sampler_LinearClamp, uv).r;
-    half thirdMaskPow = clamp(10 - _ThirdLayerRange, 0.1, 5.0);
-    layer.mask = pow(saturate(layer.mask), thirdMaskPow);
-    half thirdMaskSharp = saturate(0.5 - _ThirdLayerPower);
-    layer.mask = smoothstep(0.5 - thirdMaskSharp, 0.5 + thirdMaskSharp, layer.mask);
-    layer.mask *= _ThirdLayerIntensity;
+    half2 layer3UV = uv * _ThirdLayerTilingOffset.xy + _ThirdLayerTilingOffset.zw;
+    half rawMask = SAMPLE_TEXTURE2D(_ThirdLayerMaskMap, sampler_LinearClamp, uv).r;
+    layer.mask = ProcessLayerMask(rawMask, _ThirdLayerRange, _ThirdLayerPower, _ThirdLayerIntensity);
     
-    // Sample diffuse
-    half4 diffuse = SAMPLE_TEXTURE2D(_ThirdLayerDiffuseMap, sampler_BaseMap, layer3UV);
-    layer.albedo = diffuse.rgb * _ThirdLayerDiffuseColor.rgb * _BaseColor.rgb;
+    layer.albedo = SAMPLE_TEXTURE2D(_ThirdLayerDiffuseMap, sampler_BaseMap, layer3UV).rgb
+                   * _ThirdLayerDiffuseColor.rgb * _BaseColor.rgb;
+    layer.normalTS = UnpackNormalScale(
+        SAMPLE_TEXTURE2D(_ThirdLayerNormalMap, sampler_BumpMap, layer3UV), _ThirdLayerNormalScale);
     
-    // Sample normal
-    layer.normalTS = UnpackNormalScale(SAMPLE_TEXTURE2D(_ThirdLayerNormalMap, sampler_BumpMap, layer3UV), _ThirdLayerNormalScale);
-    
-    // Sample MAHS
     half4 mahs = SAMPLE_TEXTURE2D(_ThirdLayerMAHSMap, sampler_LinearRepeat, layer3UV);
     layer.metallic = mahs.r * _ThirdLayerMetallicScale;
     layer.occlusion = LerpWhiteTo(mahs.g, _ThirdLayerOcclusionScale);
@@ -291,25 +286,17 @@ LayerData SampleThirdLayer(float2 uv)
 LayerData SampleFourthLayer(float2 uv)
 {
     LayerData layer = (LayerData)0;
-    half2 layer4UV = uv * _FourthLayerTilingOffset.xy + _FourthLayerTilingOffset.zw;
     
     #if defined(_USE_FOURTH_LAYER)
-    // Sample mask
-    layer.mask = SAMPLE_TEXTURE2D(_FourthLayerMaskMap, sampler_LinearClamp, uv).r;
-    half fourthMaskPow = clamp(10 - _FourthLayerRange, 0.1, 5.0);
-    layer.mask = pow(saturate(layer.mask), fourthMaskPow);
-    half fourthMaskSharp = saturate(0.5 - _FourthLayerPower);
-    layer.mask = smoothstep(0.5 - fourthMaskSharp, 0.5 + fourthMaskSharp, layer.mask);
-    layer.mask *= _FourthLayerIntensity;
+    half2 layer4UV = uv * _FourthLayerTilingOffset.xy + _FourthLayerTilingOffset.zw;
+    half rawMask = SAMPLE_TEXTURE2D(_FourthLayerMaskMap, sampler_LinearClamp, uv).r;
+    layer.mask = ProcessLayerMask(rawMask, _FourthLayerRange, _FourthLayerPower, _FourthLayerIntensity);
     
-    // Sample diffuse
-    half4 diffuse = SAMPLE_TEXTURE2D(_FourthLayerDiffuseMap, sampler_BaseMap, layer4UV);
-    layer.albedo = diffuse.rgb * _FourthLayerDiffuseColor.rgb;
+    layer.albedo = SAMPLE_TEXTURE2D(_FourthLayerDiffuseMap, sampler_BaseMap, layer4UV).rgb
+                   * _FourthLayerDiffuseColor.rgb;
+    layer.normalTS = UnpackNormalScale(
+        SAMPLE_TEXTURE2D(_FourthLayerNormalMap, sampler_BumpMap, layer4UV), _FourthLayerNormalScale);
     
-    // Sample normal
-    layer.normalTS = UnpackNormalScale(SAMPLE_TEXTURE2D(_FourthLayerNormalMap, sampler_BumpMap, layer4UV), _FourthLayerNormalScale);
-    
-    // Sample MAHS
     half4 mahs = SAMPLE_TEXTURE2D(_FourthLayerMAHSMap, sampler_LinearRepeat, layer4UV);
     layer.metallic = mahs.r * _FourthLayerMetallicScale;
     layer.occlusion = LerpWhiteTo(mahs.g, _FourthLayerOcclusionScale);

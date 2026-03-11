@@ -27,7 +27,6 @@ Shader "Universal Render Pipeline/SSSLit"
         _WorkflowMode               ("Workflow Mode", Float) = 1.0
         
         [Header(Advanced Lighting)]
-        [Toggle(_USE_BURLEY_DIFFUSE)] _UseBurleyDiffuse("Enable Burley Diffuse", Float) = 1
         [Toggle(_USE_DUAL_SPECULAR_LOBE)] _UseDualSpecularLobe("Enable Dual Specular Lobe", Float) = 0
         _DualSpecularLobe0Roughness("Lobe0 Roughness Multiplier", Range(0.1, 1.0)) = 0.5
         _DualSpecularLobe1Roughness("Lobe1 Roughness Multiplier", Range(1.0, 4.0)) = 2.0
@@ -275,7 +274,6 @@ Shader "Universal Render Pipeline/SSSLit"
             
             // Advanced Lighting Keywords
             #pragma shader_feature_local_fragment _USE_DUAL_SPECULAR_LOBE
-            #pragma shader_feature_local_fragment _USE_BURLEY_DIFFUSE
             #pragma shader_feature_local_fragment _USE_PARALLAX_DETAIL
 
             // -------------------------------------
