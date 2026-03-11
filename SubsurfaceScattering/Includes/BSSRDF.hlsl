@@ -10,7 +10,6 @@ struct SSSBxDFContext
 {
     half NoV;
     half NoL;
-    half VoL;
     half NoH;
     half VoH;
 };
@@ -19,22 +18,10 @@ void InitSSSBxDFContext(inout SSSBxDFContext Context, half3 N, half3 V, half3 L)
 {
     Context.NoL = dot(N, L);
     Context.NoV = dot(N, V);
-    Context.VoL = dot(V, L);
-    float InvLenH = rsqrt(2.0 + 2.0 * Context.VoL);
+    half VoL = dot(V, L);
+    half InvLenH = rsqrt(2.0 + 2.0 * VoL);
     Context.NoH = saturate((Context.NoL + Context.NoV) * InvLenH);
-    Context.VoH = saturate(InvLenH + InvLenH * Context.VoL);
-}
-
-//=============================================================================
-// Burley Diffuse - [Burley 2012, "Physically-Based Shading at Disney"]
-// Reference: UE5 BRDF. ush Diffuse_Burley
-//=============================================================================
-half3 Diffuse_Burley_SSS(half3 DiffuseColor, half Roughness, half NoV, half NoL, half VoH)
-{
-    half FD90 = 0.5 + 2.0 * VoH * VoH * Roughness;
-    half FdV = 1.0 + (FD90 - 1.0) * Pow5(1.0 - NoV);
-    half FdL = 1.0 + (FD90 - 1.0) * Pow5(1.0 - NoL);
-    return DiffuseColor * ((1.0 / PI) * FdV * FdL);
+    Context.VoH = saturate(InvLenH + InvLenH * VoL);
 }
 
 // Standard Lambert Diffuse
@@ -58,8 +45,9 @@ half D_GGX_SSS(half a2, half NoH)
 half Vis_SmithJointApprox_SSS(half a2, half NoV, half NoL)
 {
     half a = sqrt(a2);
-    half Vis_SmithV = NoL * (NoV * (1.0 - a) + a);
-    half Vis_SmithL = NoV * (NoL * (1.0 - a) + a);
+    half oneMinusA = 1.0 - a;
+    half Vis_SmithV = NoL * (NoV * oneMinusA + a);
+    half Vis_SmithL = NoV * (NoL * oneMinusA + a);
     return 0.5 * rcp(Vis_SmithV + Vis_SmithL);
 }
 
@@ -68,7 +56,7 @@ half3 F_Schlick_SSS(half3 SpecularColor, half VoH)
 {
     half Fc = Pow5(1.0 - VoH);
     // Anything less than 2% is physically impossible and is instead considered to be shadowing
-    return saturate(50.0 * SpecularColor. g) * Fc + (1.0 - Fc) * SpecularColor;
+    return saturate(50.0 * SpecularColor.g) * Fc + (1.0 - Fc) * SpecularColor;
 }
 
 //=============================================================================
@@ -76,39 +64,36 @@ half3 F_Schlick_SSS(half3 SpecularColor, half VoH)
 // Reference:  Karis 2013, "Real Shading in Unreal Engine 4"
 //=============================================================================
 
-// Approximate directional-hemispherical reflectance (integral of F * G * D over hemisphere)
-// This is used to compute energy that should be removed from diffuse
-half3 EnvBRDFApprox_SSS(half3 SpecularColor, half Roughness, half NoV)
+// Unified energy terms computation: outputs both preservation and conservation
+// in a single pass, avoiding duplicate EnvBRDFApprox calculations
+void ComputeEnergyTerms_SSS(half3 SpecularColor, half Roughness, half NoV,
+    out half3 energyPreservation, out half3 energyConservation)
 {
-    // Lazarov 2013, "Getting More Physical in Call of Duty: Black Ops II"
     const half4 c0 = half4(-1.0, -0.0275, -0.572, 0.022);
     const half4 c1 = half4(1.0, 0.0425, 1.04, -0.04);
     half4 r = Roughness * c0 + c1;
     half a004 = min(r.x * r.x, exp2(-9.28 * NoV)) * r.x + r.y;
     half2 AB = half2(-1.04, 1.04) * a004 + r.zw;
-    
-    // F90 approximation for energy conservation
+
     half F90 = saturate(50.0 * SpecularColor.g);
-    return SpecularColor * AB.x + F90 * AB.y;
+    half3 specReflectance = SpecularColor * AB.x + F90 * AB.y;
+
+    energyPreservation = 1.0 - specReflectance;
+    energyConservation = min(1.0 + SpecularColor * (rcp(max(specReflectance, 0.001)) - 1.0), 2.0);
 }
 
-// Compute energy preservation factor for diffuse (1 - specular reflection)
-// This ensures energy conservation:  diffuse is attenuated by what specular reflects
+// Lightweight version: only outputs energyPreservation (for paths needing only diffuse compensation)
 half3 ComputeEnergyPreservation_SSS(half3 SpecularColor, half Roughness, half NoV)
 {
-    half3 specularReflectance = EnvBRDFApprox_SSS(SpecularColor, Roughness, NoV);
-    return 1.0 - specularReflectance;
-}
+    const half4 c0 = half4(-1.0, -0.0275, -0.572, 0.022);
+    const half4 c1 = half4(1.0, 0.0425, 1.04, -0.04);
+    half4 r = Roughness * c0 + c1;
+    half a004 = min(r.x * r.x, exp2(-9.28 * NoV)) * r.x + r.y;
+    half2 AB = half2(-1.04, 1.04) * a004 + r.zw;
 
-// Compute energy conservation factor for specular (multiple scattering compensation)
-// Reference: Turquin 2019, "Practical multiple scattering compensation for microfacet models"
-half3 ComputeEnergyConservation_SSS(half3 SpecularColor, half Roughness, half NoV)
-{
-    half3 specularReflectance = EnvBRDFApprox_SSS(SpecularColor, Roughness, NoV);
-    // Approximate multiple scattering by boosting specular based on what's missing
-    // This is a simplified version of the full multiple scattering compensation
-    half3 multiScatterCompensation = 1.0 + SpecularColor * (1.0 / max(specularReflectance, 0.001) - 1.0);
-    return min(multiScatterCompensation, 2.0); // Clamp to avoid extreme values
+    half F90 = saturate(50.0 * SpecularColor.g);
+    half3 specReflectance = SpecularColor * AB.x + F90 * AB.y;
+    return 1.0 - specReflectance;
 }
 
 //=============================================================================
@@ -119,21 +104,10 @@ void GetDualSpecularLobeParameters(half Roughness, half SubsurfaceMask,
     half Lobe0RoughnessMult, half Lobe1RoughnessMult, half LobeMixParam,
     out half Lobe0Roughness, out half Lobe1Roughness, out half LobeMix)
 {
-    // Smooth blend out dual specular when subsurface mask is low
-    // Following UE5's opacity-based blending
     half BlendFactor = saturate((SubsurfaceMask - 0.01) * 10.0);
-    
-    // Apply blend factor to roughness multipliers
-    half ActualLobe0Mult = lerp(1.0, Lobe0RoughnessMult, BlendFactor);
-    half ActualLobe1Mult = lerp(1.0, Lobe1RoughnessMult, BlendFactor);
-    
-    // Compute final lobe roughnesses
-    // Lobe0: sharper (lower roughness), clamped to minimum 0.02 to avoid specular explosion
-    Lobe0Roughness = max(saturate(Roughness * ActualLobe0Mult), 0.02);
-    // Lobe1: broader (higher roughness)
-    Lobe1Roughness = saturate(Roughness * ActualLobe1Mult);
-    
-    // Mix factor also affected by blend
+
+    Lobe0Roughness = max(saturate(Roughness * lerp(1.0, Lobe0RoughnessMult, BlendFactor)), 0.02);
+    Lobe1Roughness = saturate(Roughness * lerp(1.0, Lobe1RoughnessMult, BlendFactor));
     LobeMix = LobeMixParam * BlendFactor;
 }
 
@@ -149,7 +123,7 @@ half3 DualSpecularGGX_SSS(half3 SpecularColor, SSSBxDFContext Context, half NoL,
     half Lobe1Alpha2 = Pow4(Lobe1Roughness);
     
     // Dual lobe NDF - lerp between two D_GGX with different roughnesses
-    half D0 = D_GGX_SSS(Lobe0Alpha2, Context. NoH);
+    half D0 = D_GGX_SSS(Lobe0Alpha2, Context.NoH);
     half D1 = D_GGX_SSS(Lobe1Alpha2, Context.NoH);
     half D = lerp(D0, D1, LobeMix);
     
@@ -200,156 +174,96 @@ void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
     half clearCoatMask, bool specularHighlightsOff, half3 transmittance,
     uint diffusionProfileIndex, half subsurfaceMask, out half3 diffuse, out half3 specular)
 {
-    // Initialize BxDF Context - Following UE5 approach
     SSSBxDFContext Context;
     InitSSSBxDFContext(Context, normalWS, viewDirectionWS, lightDirectionWS);
-    
+
     half NdotL = Context.NoL;
     half clampedNdotL = saturate(NdotL);
     half clampedNoV = saturate(abs(Context.NoV) + 1e-5);
-    
-    // Following HDRP:  compute wrapped NdotL for transmission (back-lighting)
+
     #define TRANSMISSION_WRAP_LIGHT 0.2588190451025207701
     half flippedNdotL = ComputeWrappedDiffuseLighting(-NdotL, TRANSMISSION_WRAP_LIGHT);
-    
-    half3 radianceR = lightColor * (diffuselightAttenuation * clampedNdotL);
-    half3 radianceT = lightColor * (transmissionLightAttenuation * flippedNdotL);
-    
-    // Apply Diffuse Power modification (following HDRP)
+
+    half3 lightAtten = lightColor * diffuselightAttenuation;
+
+    // Diffuse Power - use [branch] to skip unnecessary pow
     half diffuseNdotL = clampedNdotL;
     float diffusePower = GetDiffusePower(diffusionProfileIndex);
-    if (diffusePower != 0.0)
+    [branch] if (diffusePower != 0.0)
     {
-        diffuseNdotL = pow(diffuseNdotL, max(diffusePower + 1, 1.0));
-        diffuseNdotL *= diffusePower * 0.5 + 1;
+        half powExp = max(diffusePower + 1, 1.0);
+        diffuseNdotL = pow(diffuseNdotL, powExp) * (diffusePower * 0.5 + 1);
     }
 
     //=========================================================================
-    // Specular Calculation First (needed for energy preservation)
+    // Specular + energy terms unified computation
     //=========================================================================
     specular = half3(0, 0, 0);
-    half energyPreservationRoughness = brdfData.roughness; // Used for energy calc
-    
+    half3 energyPreservation = half3(1, 1, 1);
+
 #ifndef _SPECULARHIGHLIGHTS_OFF
     [branch] if (!specularHighlightsOff)
     {
-        SSSBxDFContext SpecContext = Context;
+        half energyRoughness;
+        half3 specBRDF;
+        SSSBxDFContext SpecContext;
+        SpecContext.NoL = Context.NoL;
         SpecContext.NoV = clampedNoV;
-        
-        #if defined(_USE_DUAL_SPECULAR_LOBE)
-            // Get parameters from material properties
-            half Lobe0Roughness, Lobe1Roughness, LobeMix;
-            GetDualSpecularLobeParameters(
-                brdfData.roughness, 
-                subsurfaceMask,
-                _DualSpecularLobe0Roughness,  // From material
-                _DualSpecularLobe1Roughness,  // From material
-                _DualSpecularLobeMix,         // From material
-                Lobe0Roughness, 
-                Lobe1Roughness, 
-                LobeMix
-            );
-            
-            half AverageRoughness;
-            half3 specBRDF = DualSpecularGGX_SSS(brdfData.specular, SpecContext, clampedNdotL,
-                Lobe0Roughness, Lobe1Roughness, LobeMix, AverageRoughness);
-            
-            // Use average roughness for energy conservation
-            energyPreservationRoughness = AverageRoughness;
-            
-            // Apply energy conservation to specular
-            half3 energyConservation = ComputeEnergyConservation_SSS(brdfData.specular, AverageRoughness, clampedNoV);
-            specular = specBRDF * energyConservation * radianceR;
-        #else
-            // Standard single lobe specular
-            half3 specBRDF = SingleSpecularGGX_SSS(brdfData.specular, SpecContext, clampedNdotL, brdfData.roughness);
-            
-            // Apply energy conservation
-            half3 energyConservation = ComputeEnergyConservation_SSS(brdfData.specular, brdfData.roughness, clampedNoV);
-            specular = specBRDF * energyConservation * radianceR;
-        #endif
+        SpecContext.NoH = Context.NoH;
+        SpecContext.VoH = Context.VoH;
 
-#if defined(_CLEARCOAT) || defined(_CLEARCOATMAP)
-        half brdfCoat = kDielectricSpec. r * DirectBRDFSpecular(brdfDataClearCoat, normalWS, lightDirectionWS, viewDirectionWS);
-        half NoV = saturate(dot(normalWS, viewDirectionWS));
-        half coatFresnel = kDielectricSpec.x + kDielectricSpec.a * Pow4(1.0 - NoV);
-        specular = specular * (1.0 - clearCoatMask * coatFresnel) + brdfCoat * clearCoatMask * radianceR;
-#endif
+        #if defined(_USE_DUAL_SPECULAR_LOBE)
+            half L0R, L1R, LMix;
+            GetDualSpecularLobeParameters(brdfData.roughness, subsurfaceMask,
+                _DualSpecularLobe0Roughness, _DualSpecularLobe1Roughness, _DualSpecularLobeMix,
+                L0R, L1R, LMix);
+            half AverageRoughness;
+            specBRDF = DualSpecularGGX_SSS(brdfData.specular, SpecContext, clampedNdotL,
+                L0R, L1R, LMix, AverageRoughness);
+            energyRoughness = AverageRoughness;
+        #else
+            specBRDF = SingleSpecularGGX_SSS(brdfData.specular, SpecContext, clampedNdotL, brdfData.roughness);
+            energyRoughness = brdfData.roughness;
+        #endif
+        
+        half3 energyConservation;
+        ComputeEnergyTerms_SSS(brdfData.specular, energyRoughness, clampedNoV,
+            energyPreservation, energyConservation);
+
+        specular = specBRDF * energyConservation * (lightAtten * clampedNdotL);
     }
 #endif
 
-    //=========================================================================
-    // Diffuse Calculation with Energy Preservation
-    //=========================================================================
-    // Compute energy preservation (what's left after specular reflection)
-    half3 energyPreservation = ComputeEnergyPreservation_SSS(brdfData.specular, energyPreservationRoughness, clampedNoV);
-    
-    half3 diffuseReflection;
-    #if defined(_USE_BURLEY_DIFFUSE)
-        // Burley Diffuse [Disney 2012]
-        diffuseReflection = Diffuse_Burley_SSS(brdfData.diffuse, brdfData.roughness, 
-            clampedNoV, clampedNdotL, Context.VoH);
-    #else
-        // Standard Lambert
-        diffuseReflection = Diffuse_Lambert_SSS(brdfData.diffuse);
-    #endif
-    
-    // Apply energy preservation to diffuse
-    diffuseReflection *= energyPreservation;
-    
-    // Diffuse split:  reflection + transmission
-    half3 diffR = diffuseReflection * lightColor * (diffuselightAttenuation * diffuseNdotL);
-    half3 transmissionBxDF = brdfData.diffuse; 
-    half3 diffT = transmissionBxDF * radianceT * transmittance;
+    // Diffuse: Lambert with energy preservation
+    half3 diffuseBase = brdfData.diffuse * (1.0 / PI);
+    half3 diffR = diffuseBase * energyPreservation * (lightAtten * diffuseNdotL);
+    half3 diffT = brdfData.diffuse * (lightColor * (transmissionLightAttenuation * flippedNdotL)) * transmittance;
     diffuse = diffR + diffT;
 }
 
 // ============================================================================
-// 新增：山石风格光照计算（用于雪层覆盖区域，与 TerrainFar 保持一致）
-// 对应 Lighting.hlsl 中 BRDFPhysicallyBased + LightingPhysicallyBasedSceneOpt
+// Terrain-style lighting (for snow-covered areas, consistent with TerrainFar)
 // ============================================================================
 half3 BRDFPhysicallyBased_TerrainStyle(BRDFData brdfData, half ndotL, half3 lightDirectionWS,
     half3 normalWS, half3 viewDirectionWS,
     bool specularHighlightsOff,
     half metallic, half NoH2, half LoH2)
 {
-    // Diffuse —— 与山石一致，使用 _SoulCustomLightDiffuseIntensity
-    #if defined(CONSTANT_EDITOR)
-        half diffuseIntensity = lerp(1, _SoulCustomLightDiffuseIntensity, _SoulCustomLightEnable);
-    #else
-        half diffuseIntensity = _SoulCustomLightDiffuseIntensity;
-    #endif
-    
-    half3 diffuse = brdfData.diffuse * diffuseIntensity;
-    half3 brdf = diffuse;
+    half3 brdf = brdfData.diffuse;
 
-    // Specular —— 与山石一致，使用 DirectBRDFSpecularOpt + fastRemap 截断
     [branch] if (!specularHighlightsOff)
     {
         half directSpecular = DirectBRDFSpecularOpt(brdfData, normalWS, lightDirectionWS, viewDirectionWS, NoH2, LoH2);
         
-        // 高光快速映射截断（与山石完全一致）
         half fastRemapA = lerp(_NoMetalDirectSpecularDetail, _MetalDirectSpecularDetail, metallic);
         half fastRemapB = lerp(_NoMetalDirectSpecularIntensity, _MetalDirectSpecularIntensity, metallic);
-        half directSpecularClamped = fastRemap(directSpecular, fastRemapA, fastRemapB);
-        #if defined(CONSTANT_EDITOR)
-            directSpecular = lerp(directSpecular, directSpecularClamped, _SoulDirectSpecularMaxEnable);
-        #else
-            directSpecular = directSpecularClamped;
-        #endif
+        directSpecular = fastRemap(directSpecular, fastRemapA, fastRemapB);
         
-        // Custom Specular 强度（与山石一致）
-        #if defined(CONSTANT_EDITOR)
-            half specularIntensity = lerp(1, _SoulCustomLightSpecularIntensity, _SoulCustomLightEnable);
-        #else
-            half specularIntensity = _SoulCustomLightSpecularIntensity;
-        #endif
-        brdf += brdfData.specular * (directSpecular * specularIntensity);
+        brdf += brdfData.specular * directSpecular;
     }
     return brdf;
 }
 
-// 新增：山石风格拆分光照（替代 LightingPhysicallyBasedSplit 用于雪层区域）
 void LightingPhysicallyBasedSplit_TerrainStyle(BRDFData brdfData, BRDFData brdfDataClearCoat,
     half3 lightColor, half3 lightDirectionWS, float lightAttenuation,
     half3 normalWS, half3 viewDirectionWS,
@@ -359,7 +273,6 @@ void LightingPhysicallyBasedSplit_TerrainStyle(BRDFData brdfData, BRDFData brdfD
 {
     half NdotL = saturate(dot(normalWS, lightDirectionWS));
     
-    // 预计算 NoH2, LoH2 用于 DirectBRDFSpecularOpt
     half NoH2, LoH2;
     DirectBRDFSpecularData(normalWS, lightDirectionWS, viewDirectionWS, NoH2, LoH2);
     
@@ -368,16 +281,8 @@ void LightingPhysicallyBasedSplit_TerrainStyle(BRDFData brdfData, BRDFData brdfD
     
     half3 radiance = lightColor * (lightAttenuation * NdotL);
     
-    // 将 brdf 拆分为 diffuse 和 specular 部分
-    // diffuse 部分 = brdfData.diffuse * diffuseIntensity
-    #if defined(CONSTANT_EDITOR)
-        half diffuseIntensity = lerp(1, _SoulCustomLightDiffuseIntensity, _SoulCustomLightEnable);
-    #else
-        half diffuseIntensity = _SoulCustomLightDiffuseIntensity;
-    #endif
-    
-    diffuse = brdfData.diffuse * diffuseIntensity * radiance;
-    specular = (brdf - brdfData.diffuse * diffuseIntensity) * radiance;
+    diffuse = brdfData.diffuse * radiance;
+    specular = (brdf - brdfData.diffuse) * radiance;
 }
 
 

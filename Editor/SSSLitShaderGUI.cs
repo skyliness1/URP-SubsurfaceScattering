@@ -31,10 +31,7 @@ namespace SoulRender
 
             // Advanced Lighting section
             public static readonly GUIContent advancedLightingHeader = EditorGUIUtility.TrTextContent("高级光照设置",
-                "Configure advanced lighting options including Burley Diffuse and Dual Specular Lobe.");
-
-            public static readonly GUIContent useBurleyDiffuseText = EditorGUIUtility.TrTextContent("Use Burley Diffuse",
-                "When enabled, uses Disney's Burley diffuse model instead of Lambert.");
+                "Configure advanced lighting options including Dual Specular Lobe.");
 
             public static readonly GUIContent useDualSpecularLobeText = EditorGUIUtility.TrTextContent("使用双叶高光",
                 "When enabled, uses two specular lobes for more realistic skin/SSS specular highlights.");
@@ -187,7 +184,6 @@ namespace SoulRender
         // Shader Property IDs
         public static class AdvancedLightingShaderIDs
         {
-            public static readonly string UseBurleyDiffuse = "_UseBurleyDiffuse";
             public static readonly string UseDualSpecularLobe = "_UseDualSpecularLobe";
             public static readonly string DualSpecularLobe0Roughness = "_DualSpecularLobe0Roughness";
             public static readonly string DualSpecularLobe1Roughness = "_DualSpecularLobe1Roughness";
@@ -344,7 +340,6 @@ namespace SoulRender
         /// </summary>
         public struct AdvancedLightingProperties
         {
-            public MaterialProperty useBurleyDiffuse;
             public MaterialProperty useDualSpecularLobe;
             public MaterialProperty dualSpecularLobe0Roughness;
             public MaterialProperty dualSpecularLobe1Roughness;
@@ -354,7 +349,6 @@ namespace SoulRender
 
             public AdvancedLightingProperties(MaterialProperty[] properties)
             {
-                useBurleyDiffuse = BaseShaderGUI.FindProperty(AdvancedLightingShaderIDs.UseBurleyDiffuse, properties, false);
                 useDualSpecularLobe = BaseShaderGUI.FindProperty(AdvancedLightingShaderIDs.UseDualSpecularLobe, properties, false);
                 dualSpecularLobe0Roughness = BaseShaderGUI.FindProperty(AdvancedLightingShaderIDs.DualSpecularLobe0Roughness, properties, false);
                 dualSpecularLobe1Roughness = BaseShaderGUI.FindProperty(AdvancedLightingShaderIDs.DualSpecularLobe1Roughness, properties, false);
@@ -783,19 +777,6 @@ namespace SoulRender
         /// </summary>
         public void DrawAdvancedLightingInputs(Material material)
         {
-            // Burley Diffuse Toggle
-            if (advancedLightingProperties.useBurleyDiffuse != null)
-            {
-                EditorGUI.BeginChangeCheck();
-                materialEditor.ShaderProperty(advancedLightingProperties.useBurleyDiffuse, Styles.useBurleyDiffuseText);
-                if (EditorGUI.EndChangeCheck())
-                {
-                    SetAdvancedLightingKeywords(material);
-                }
-            }
-
-            EditorGUILayout.Space(5);
-
             // Dual Specular Lobe Section
             if (advancedLightingProperties.useDualSpecularLobe != null)
             {
@@ -1509,12 +1490,6 @@ namespace SoulRender
 
         private static void SetAdvancedLightingKeywords(Material material)
         {
-            if (material.HasProperty(AdvancedLightingShaderIDs.UseBurleyDiffuse))
-            {
-                bool useBurleyDiffuse = material.GetFloat(AdvancedLightingShaderIDs.UseBurleyDiffuse) > 0.5f;
-                CoreUtils.SetKeyword(material, "_USE_BURLEY_DIFFUSE", useBurleyDiffuse);
-            }
-
             if (material.HasProperty(AdvancedLightingShaderIDs.UseDualSpecularLobe))
             {
                 bool useDualSpecularLobe = material.GetFloat(AdvancedLightingShaderIDs.UseDualSpecularLobe) > 0.5f;

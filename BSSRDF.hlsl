@@ -26,7 +26,6 @@ void InitSSSBxDFContext(inout SSSBxDFContext Context, half3 N, half3 V, half3 L)
     Context.VoH = saturate(InvLenH + InvLenH * VoL);
 }
 
-
 // Standard Lambert Diffuse
 half3 Diffuse_Lambert_SSS(half3 DiffuseColor)
 {
@@ -45,7 +44,6 @@ half D_GGX_SSS(half a2, half NoH)
 }
 
 // Vis_SmithJointApprox - Following UE5 BRDF.ush
-// 优化：预计算 (1-a) 和 a，减少重复运算
 half Vis_SmithJointApprox_SSS(half a2, half NoV, half NoL)
 {
     half a = sqrt(a2);
@@ -68,10 +66,8 @@ half3 F_Schlick_SSS(half3 SpecularColor, half VoH)
 // Reference:  Karis 2013, "Real Shading in Unreal Engine 4"
 //=============================================================================
 
-// Approximate directional-hemispherical reflectance (integral of F * G * D over hemisphere)
-// This is used to compute energy that should be removed from diffuse
-// 优化：将能量守恒拆分为两个版本
-// 完整版本：同时输出 preservation 和 conservation（用于需要两者的路径）
+// Unified energy terms computation: outputs both preservation and conservation
+// in a single pass, avoiding duplicate EnvBRDFApprox calculations
 void ComputeEnergyTerms_SSS(half3 SpecularColor, half Roughness, half NoV,
     out half3 energyPreservation, out half3 energyConservation)
 {
@@ -88,7 +84,7 @@ void ComputeEnergyTerms_SSS(half3 SpecularColor, half Roughness, half NoV,
     energyConservation = min(1.0 + SpecularColor * (rcp(max(specReflectance, 0.001)) - 1.0), 2.0);
 }
 
-// 轻量版本：仅输出 energyPreservation（用于只需要漫反射能量补偿的路径）
+// Lightweight version: only outputs energyPreservation (for paths needing only diffuse compensation)
 half3 ComputeEnergyPreservation_SSS(half3 SpecularColor, half Roughness, half NoV)
 {
     const half4 c0 = half4(-1.0, -0.0275, -0.572, 0.022);
@@ -127,11 +123,19 @@ half3 DualSpecularGGX_SSS(half3 SpecularColor, SSSBxDFContext Context, half NoL,
     half AverageAlpha2 = Pow4(AverageRoughness);
     half Lobe0Alpha2 = Pow4(Lobe0Roughness);
     half Lobe1Alpha2 = Pow4(Lobe1Roughness);
-
-    half D = lerp(D_GGX_SSS(Lobe0Alpha2, Context.NoH), D_GGX_SSS(Lobe1Alpha2, Context.NoH), LobeMix);
+    
+    // Dual lobe NDF - lerp between two D_GGX with different roughnesses
+    half D0 = D_GGX_SSS(Lobe0Alpha2, Context. NoH);
+    half D1 = D_GGX_SSS(Lobe1Alpha2, Context.NoH);
+    half D = lerp(D0, D1, LobeMix);
+    
+    // Average visibility well approximates using two separate ones (one per lobe)
+    // Following UE5 comment in DualSpecularGGX
     half Vis = Vis_SmithJointApprox_SSS(AverageAlpha2, Context.NoV, NoL);
+    
+    // Fresnel
     half3 F = F_Schlick_SSS(SpecularColor, Context.VoH);
-
+    
     return (D * Vis) * F;
 }
 
@@ -167,7 +171,7 @@ inline void InitializeBRDFDataSSS(inout SurfaceData surfaceData, uint diffusionP
 }
 
 void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
-    half3 lightColor, half3 lightDirectionWS, float lightAttenuation,
+    half3 lightColor, half3 lightDirectionWS, float diffuselightAttenuation, float transmissionLightAttenuation,
     half3 normalWS, half3 viewDirectionWS,
     half clearCoatMask, bool specularHighlightsOff, half3 transmittance,
     uint diffusionProfileIndex, half subsurfaceMask, out half3 diffuse, out half3 specular)
@@ -182,9 +186,9 @@ void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
     #define TRANSMISSION_WRAP_LIGHT 0.2588190451025207701
     half flippedNdotL = ComputeWrappedDiffuseLighting(-NdotL, TRANSMISSION_WRAP_LIGHT);
 
-    half3 lightAtten = lightColor * lightAttenuation;
+    half3 lightAtten = lightColor * diffuselightAttenuation;
 
-    // 优化：Diffuse Power - 使用 branch 跳过不需要的 pow 计算
+    // Diffuse Power - use [branch] to skip unnecessary pow
     half diffuseNdotL = clampedNdotL;
     float diffusePower = GetDiffusePower(diffusionProfileIndex);
     [branch] if (diffusePower != 0.0)
@@ -194,7 +198,7 @@ void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
     }
 
     //=========================================================================
-    // 优化: specular + energy terms 合并计算，避免冗余分支
+    // Specular + energy terms unified computation
     //=========================================================================
     specular = half3(0, 0, 0);
     half3 energyPreservation = half3(1, 1, 1);
@@ -202,7 +206,6 @@ void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
 #ifndef _SPECULARHIGHLIGHTS_OFF
     [branch] if (!specularHighlightsOff)
     {
-        // 优化：直接使用 clampedNoV，避免创建 SpecContext 副本
         half energyRoughness;
         half3 specBRDF;
         SSSBxDFContext SpecContext;
@@ -229,48 +232,40 @@ void LightingPhysicallyBasedSplit(BRDFData brdfData, BRDFData brdfDataClearCoat,
         ComputeEnergyTerms_SSS(brdfData.specular, energyRoughness, clampedNoV,
             energyPreservation, energyConservation);
 
-        // 优化：合并乘法 (specBRDF * energyConservation * lightAtten * NdotL)
         specular = specBRDF * energyConservation * (lightAtten * clampedNdotL);
     }
 #endif
 
-    // 优化：合并 diffuse 计算，提取公共因子
+    // Diffuse: Lambert with energy preservation
     half3 diffuseBase = brdfData.diffuse * (1.0 / PI);
     half3 diffR = diffuseBase * energyPreservation * (lightAtten * diffuseNdotL);
-    half3 diffT = brdfData.diffuse * (lightAtten * flippedNdotL) * transmittance;
+    half3 diffT = brdfData.diffuse * (lightColor * (transmissionLightAttenuation * flippedNdotL)) * transmittance;
     diffuse = diffR + diffT;
 }
 
 // ============================================================================
-// 新增：山石风格光照计算（用于雪层覆盖区域，与 TerrainFar 保持一致）
-// 对应 Lighting.hlsl 中 BRDFPhysicallyBased + LightingPhysicallyBasedSceneOpt
+// Terrain-style lighting (for snow-covered areas, consistent with TerrainFar)
 // ============================================================================
 half3 BRDFPhysicallyBased_TerrainStyle(BRDFData brdfData, half ndotL, half3 lightDirectionWS,
     half3 normalWS, half3 viewDirectionWS,
     bool specularHighlightsOff,
     half metallic, half NoH2, half LoH2)
 {
-    
-    half3 diffuse = brdfData.diffuse;
-    half3 brdf = diffuse;
+    half3 brdf = brdfData.diffuse;
 
-    // Specular —— 与山石一致，使用 DirectBRDFSpecularOpt + fastRemap 截断
     [branch] if (!specularHighlightsOff)
     {
         half directSpecular = DirectBRDFSpecularOpt(brdfData, normalWS, lightDirectionWS, viewDirectionWS, NoH2, LoH2);
         
-        // 高光快速映射截断（与山石完全一致）
         half fastRemapA = lerp(_NoMetalDirectSpecularDetail, _MetalDirectSpecularDetail, metallic);
         half fastRemapB = lerp(_NoMetalDirectSpecularIntensity, _MetalDirectSpecularIntensity, metallic);
-        half directSpecularClamped = fastRemap(directSpecular, fastRemapA, fastRemapB);
-        directSpecular = directSpecularClamped;
+        directSpecular = fastRemap(directSpecular, fastRemapA, fastRemapB);
         
-        brdf += brdfData.specular * (directSpecular);
+        brdf += brdfData.specular * directSpecular;
     }
     return brdf;
 }
 
-// 新增：山石风格拆分光照（替代 LightingPhysicallyBasedSplit 用于雪层区域）
 void LightingPhysicallyBasedSplit_TerrainStyle(BRDFData brdfData, BRDFData brdfDataClearCoat,
     half3 lightColor, half3 lightDirectionWS, float lightAttenuation,
     half3 normalWS, half3 viewDirectionWS,
@@ -280,7 +275,6 @@ void LightingPhysicallyBasedSplit_TerrainStyle(BRDFData brdfData, BRDFData brdfD
 {
     half NdotL = saturate(dot(normalWS, lightDirectionWS));
     
-    // 预计算 NoH2, LoH2 用于 DirectBRDFSpecularOpt
     half NoH2, LoH2;
     DirectBRDFSpecularData(normalWS, lightDirectionWS, viewDirectionWS, NoH2, LoH2);
     
@@ -292,5 +286,6 @@ void LightingPhysicallyBasedSplit_TerrainStyle(BRDFData brdfData, BRDFData brdfD
     diffuse = brdfData.diffuse * radiance;
     specular = (brdf - brdfData.diffuse) * radiance;
 }
+
 
 #endif

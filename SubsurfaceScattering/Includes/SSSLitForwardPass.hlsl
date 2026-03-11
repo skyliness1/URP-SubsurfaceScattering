@@ -292,7 +292,7 @@ inline void InitializeStandardSSSLitSurfaceData(
         
         // 输出视差遮罩
         parallaxMask = parallaxResult.mask;
-        subsurfaceMask = lerp(subsurfaceMask, 0, saturate(parallaxMask));
+        finalSubsurfaceMask *= saturate(1.0 - parallaxMask);
     }
     #endif
 
@@ -300,29 +300,29 @@ inline void InitializeStandardSSSLitSurfaceData(
     float2 overlayUV = uv * _OverlayTilingOffset.xy + _OverlayTilingOffset.zw;
     half3 overlayNormal = UnpackNormalScale(SAMPLE_TEXTURE2D(_OverlayNormalMap, sampler_BumpMap, overlayUV), _OverlayNormalScale);
 
-    half3 finalNormalTS_NoBlend = BlendNormalRNM(finalNormalTS, overlayNormal);
-
     //=========================================================================
     // Fourth Layer Blending
     //=========================================================================
 #if defined(_USE_FOURTH_LAYER)
+    half3 normalWithOverlay = BlendNormalRNM(finalNormalTS, overlayNormal);
     LayerData fourthLayer = SampleFourthLayer(uv);
     
-    if (fourthLayer.mask > 0.001)
-    {
-        finalAlbedo = lerp(finalAlbedo, fourthLayer.albedo, fourthLayer.mask);
-        finalNormalTS = BlendNormals_Linear(finalNormalTS, fourthLayer.normalTS, fourthLayer.mask);
-        finalNormalTS_NoBlend = BlendNormals_Linear(finalNormalTS_NoBlend, fourthLayer.normalTS, fourthLayer.mask);
-        finalMetallic = lerp(finalMetallic, fourthLayer.metallic, fourthLayer.mask);
-        finalOcclusion = lerp(finalOcclusion, fourthLayer.occlusion, fourthLayer.mask);
-        finalSmoothness = lerp(finalSmoothness, fourthLayer.smoothness, fourthLayer.mask);
-        finalSubsurfaceMask = lerp(finalSubsurfaceMask, _FourthLayerSubsurfaceScattering, fourthLayer.mask);
-        layer4MaskForDetail = fourthLayer.mask;
-    }
-#endif
+    finalAlbedo = lerp(finalAlbedo, fourthLayer.albedo, fourthLayer.mask);
+    finalMetallic = lerp(finalMetallic, fourthLayer.metallic, fourthLayer.mask);
+    finalOcclusion = lerp(finalOcclusion, fourthLayer.occlusion, fourthLayer.mask);
+    finalSmoothness = lerp(finalSmoothness, fourthLayer.smoothness, fourthLayer.mask);
+    finalSubsurfaceMask = lerp(finalSubsurfaceMask, _FourthLayerSubsurfaceScattering, fourthLayer.mask);
+    layer4MaskForDetail = fourthLayer.mask;
+
+    half3 fourthBlendedNormal = BlendNormals_Linear(normalWithOverlay, fourthLayer.normalTS, fourthLayer.mask);
+    half3 fourthNoOverlay = BlendNormals_Linear(finalNormalTS, fourthLayer.normalTS, fourthLayer.mask);
+    fourthNoOverlay = BlendNormalRNM(fourthNoOverlay, overlayNormal);
+    finalNormalTS = lerp(fourthNoOverlay, fourthBlendedNormal, _FourthLayerNormalBlendIntensity);
+    #else
+    finalNormalTS = BlendNormalRNM(finalNormalTS, overlayNormal);
+    layer4MaskForDetail = 0;
     
-    half3 finalNormalTS_Blend = BlendNormalRNM(finalNormalTS, overlayNormal);
-    finalNormalTS = lerp(finalNormalTS_NoBlend, finalNormalTS_Blend, _FourthLayerNormalBlendIntensity);
+#endif
 
     subsurfaceMask = finalSubsurfaceMask;
     layer4Mask = layer4MaskForDetail;
@@ -331,13 +331,10 @@ inline void InitializeStandardSSSLitSurfaceData(
     // Output Surface Data
     //=========================================================================
 
-    half albedoLuminance = Luminance(finalAlbedo);
-    half maxAlbedoLuminance = 0.5;  
-
-    if (albedoLuminance > maxAlbedoLuminance)
-    {
-        finalAlbedo *= maxAlbedoLuminance / albedoLuminance;
-    }
+    // Branchless albedo luminance clamping
+    half albedoLum = Luminance(finalAlbedo);
+    half albedoScale = saturate(0.5h * rcp(max(albedoLum, 0.001h)));
+    finalAlbedo *= albedoScale;
 
     outSurfaceData.albedo = finalAlbedo;
     
@@ -352,7 +349,12 @@ inline void InitializeStandardSSSLitSurfaceData(
     outSurfaceData.smoothness = finalSmoothness;
     outSurfaceData.normalTS = normalize(finalNormalTS);
     outSurfaceData.occlusion = finalOcclusion;
+    
+    #if defined(_EMISSION)
     outSurfaceData.emission = SampleEmission(uv, _EmissionColor.rgb, TEXTURE2D_ARGS(_EmissionMap, sampler_EmissionMap));
+    #else
+    outSurfaceData.emission = half3(0.0, 0.0, 0.0);
+    #endif
 
 #if defined(_CLEARCOAT) || defined(_CLEARCOATMAP)
     half2 clearCoat = SampleClearCoat(uv);
@@ -392,11 +394,15 @@ void SSSBufferFragment(
 
     float2 normalizedScreenSpaceUV = GetNormalizedScreenSpaceUV(input.positionCS);
 
-    // 获取切线空间视角方向
+    // viewDirTS_detail only needed for parallax detail - gate behind keyword to save ALU
+    #if defined(_USE_PARALLAX_DETAIL)
     half3 biTangentWS = cross(input.normalWS.xyz, input.tangentWS. xyz) * input.tangentWS.w;
     half3x3 TBN = half3x3(input.tangentWS.xyz, biTangentWS, input.normalWS.xyz);
     half3 viewDirTS_detail = TransformWorldToTangent(input.viewDirWS, TBN);
     viewDirTS_detail = normalize(viewDirTS_detail);
+    #else
+    half3 viewDirTS_detail = half3(0, 0, 1);
+    #endif
 
     half subsurfaceMask;
     half layer4Mask;
@@ -459,10 +465,16 @@ void SSSBufferFragment(
     // Get diffusion profile index first
     uint diffusionProfileIndex = GetDiffusionProfileIndex(_DiffusionProfileHash);
     
-    // Initialize BRDF data with SSS-specific handling (overrides f0 from diffusion profile)
-    // This also applies SSS texturing mode to modify diffuse color (following HDRP FillMaterialSSS)
+    // Merge BRDF initialization: build SSS BRDF directly, avoid struct copy overhead
     BRDFData brdfData;
-    InitializeBRDFDataSSS(surfaceData, diffusionProfileIndex, subsurfaceMask, brdfData);
+    InitializeBRDFData(surfaceData, brdfData);
+    
+    BRDFData brdfDataForSSS = brdfData;
+    float fresnel0 = _TransmissionTintsAndFresnel0[diffusionProfileIndex].a;
+    brdfDataForSSS.specular = fresnel0;
+    brdfDataForSSS.reflectivity = fresnel0;
+    brdfDataForSSS.grazingTerm = saturate(surfaceData.smoothness + fresnel0);
+    brdfDataForSSS.diffuse = GetModifiedDiffuseColorForSSS(brdfData.diffuse, subsurfaceMask, diffusionProfileIndex);
 
     #if defined(DEBUG_DISPLAY)
     half4 debugColor;
@@ -485,17 +497,15 @@ void SSSBufferFragment(
     // Clear-coat calculation...
     AmbientOcclusionFactor aoFactor = CreateAmbientOcclusionFactor(inputData, surfaceData);
 
-    //计算全局光照 (GI / Static Lighting)
-    BRDFData brdfDataClearCoat = CreateClearCoatBRDFData(surfaceData, brdfData);
+    BRDFData brdfDataClearCoat = CreateClearCoatBRDFData(surfaceData, brdfDataForSSS);
     half4 ambientShadowMask = CalculateShadowMask(inputData);
     half3 bakedDir = ambientShadowMask.yzw;
 
     Light mainLight = GetMainLight(inputData, ambientShadowMask, aoFactor);
-    half nDotLUnSat = dot(mainLight.direction,inputData.normalWS);
-    half nDotL = saturate(nDotLUnSat);
+    half nDotL = saturate(dot(mainLight.direction, inputData.normalWS));
     half NoV = dot(inputData.normalWS, inputData.viewDirectionWS);
     
-    //Trick 单独控制室外烘焙阴影强度
+    //Trick: outdoor baked shadow intensity control
     #if defined(LIGHTMAP_OUTDOOR) && defined(LIGHTMAP_ON)
     #if defined(CONSTANT_EDITOR)
     half sceneShadowIntensity = lerp(1, _SoulSceneShadowIntensity,  _SoulCustomLightEnable);
@@ -507,106 +517,80 @@ void SSSBufferFragment(
     #endif
 
     mainLight.color *= inputData.ao;
-    BRDFData brdfDataForGI = brdfData;
     
-    half diffuseLuminance = Luminance(brdfData.diffuse);
-    half targetMaxLuminance = _GIDiffuseScale;
-
-    if (diffuseLuminance > targetMaxLuminance)
-    {
-        half3 normalizedColor = brdfData.diffuse / max(diffuseLuminance, 0.001);  // 提取色彩方向
-        brdfDataForGI.diffuse = normalizedColor * targetMaxLuminance;              // 用目标亮度重建
-    } 
+    // Branchless GI diffuse clamping
+    half giDiffuseMultiplier = saturate(_GIDiffuseScale * rcp(max(Luminance(brdfDataForSSS.diffuse), 0.001h)));
+    half3 giDiffuseColor = brdfDataForSSS.diffuse * giDiffuseMultiplier;
+    
+    // Temporarily swap diffuse for GI calculation, then restore
+    half3 originalDiffuse = brdfDataForSSS.diffuse;
+    brdfDataForSSS.diffuse = giDiffuseColor;
     
     mainLight.shadowAttenuation = lerp(1.0, mainLight.shadowAttenuation, _ShadowIntensity * sceneShadowIntensity);
     MixRealtimeAndBakedGIOpt(mainLight, nDotL, inputData.bakedGI);
     
-    half3 staticLighting = GlobalIlluminationSceneOpt(brdfDataForGI, brdfDataClearCoat, surfaceData.clearCoatMask,
+    half3 staticLighting = GlobalIlluminationSceneOpt(brdfDataForSSS, brdfDataClearCoat, surfaceData.clearCoatMask,
                                           inputData.bakedGI, aoFactor.indirectAmbientOcclusion, inputData.positionWS,
                                           inputData.normalWS, inputData.viewDirectionWS, inputData.normalizedScreenSpaceUV, bakedDir, NoV,
                                           mainLight.shadowAttenuation, 1, surfaceData.metallic);
 
+    // Restore original diffuse for direct lighting
+    brdfDataForSSS.diffuse = originalDiffuse;
+
+    // Fourth layer GI: approximate by lerping brdfData diffuse instead of computing GI twice
     #if defined(_USE_FOURTH_LAYER)
-    if (layer4Mask > 0.001)
+    [branch] if (layer4Mask > 0.001)
     {
-        BRDFData snowBrdfForGI;
-        InitializeBRDFData(surfaceData, snowBrdfForGI);
+        // Use standard brdfData (non-SSS) for snow GI approximation
+        half snowGiMultiplier = saturate(_GIDiffuseScale * rcp(max(Luminance(brdfData.diffuse), 0.001h)));
+        half3 snowGiDiffuse = brdfData.diffuse * snowGiMultiplier;
         
-        half snowDiffuseLum = Luminance(snowBrdfForGI.diffuse);
-        BRDFData snowBrdfForGIClamped = snowBrdfForGI;
-        if (snowDiffuseLum > _GIDiffuseScale)
-        {
-            half3 normalizedColor = snowBrdfForGI.diffuse / max(snowDiffuseLum, 0.001);
-            snowBrdfForGIClamped.diffuse = normalizedColor * _GIDiffuseScale;
-        }
+        half3 savedDiffuse = brdfData.diffuse;
+        brdfData.diffuse = snowGiDiffuse;
         
-        half3 snowStaticLighting = GlobalIlluminationSceneOpt(snowBrdfForGIClamped, brdfDataClearCoat, surfaceData.clearCoatMask,
+        half3 snowStaticLighting = GlobalIlluminationSceneOpt(brdfData, brdfDataClearCoat, surfaceData.clearCoatMask,
                                               inputData.bakedGI, aoFactor.indirectAmbientOcclusion, inputData.positionWS,
                                               inputData.normalWS, inputData.viewDirectionWS, inputData.normalizedScreenSpaceUV, bakedDir, NoV,
                                               mainLight.shadowAttenuation, 1, surfaceData.metallic);
         
+        brdfData.diffuse = savedDiffuse;
         staticLighting = lerp(staticLighting, snowStaticLighting, layer4Mask);
     }
     #endif
 
-    // Calculate transmittance for SSS (following HDRP approach)
-    // Ref: HDRP FillMaterialTransmission() in SubsurfaceScattering.hlsl
-    float2 thicknessRemap = _WorldScalesAndFilterRadiiAndThicknessRemaps[diffusionProfileIndex].zw;
+    // Pre-fetch diffusion profile data to avoid redundant indexing
+    float4 profileScaleData = _WorldScalesAndFilterRadiiAndThicknessRemaps[diffusionProfileIndex];
+    float2 thicknessRemap = profileScaleData.zw;
     
     float thickness = SampleThickness(input.uv);
     half thicknessPow = clamp(10 - _ThicknessRange, 0.1, 5.0);
-    thickness = pow(saturate(thickness), thicknessPow);
     half thicknessSharp = saturate(0.5 - _ThicknessPower);
-    thickness = smoothstep(0.5 - thicknessSharp, 0.5 + thicknessSharp, thickness);
+    half thicknessLow = 0.5 - thicknessSharp;
+    half thicknessHigh = 0.5 + thicknessSharp;
+    thickness = smoothstep(thicknessLow, thicknessHigh, pow(saturate(thickness), thicknessPow));
     thickness = thicknessRemap.x + thicknessRemap.y * thickness;
     
-    // Compute transmittance using baked thickness here. It may be overridden for direct lighting
-    // in the auto-thickness mode (but is always used for indirect lighting).
-    half3 transmittance = ComputeTransmittanceDisney(_ShapeParamsAndMaxScatterDists[diffusionProfileIndex].rgb,
-                                                     _TransmissionTintsAndFresnel0[diffusionProfileIndex].rgb,
-                                                     thickness) * transmissionMask;
+    float3 shapeParams = _ShapeParamsAndMaxScatterDists[diffusionProfileIndex].rgb;
+    float3 transmissionTint = _TransmissionTintsAndFresnel0[diffusionProfileIndex].rgb;
+    half3 transmittance = ComputeTransmittanceDisney(shapeParams, transmissionTint, thickness) * transmissionMask;
 
-    // Split lighting following HDRP naming convention
-    // diffuseLighting = direct diffuse + indirect diffuse + emission
-    // specularLighting = direct specular + indirect specular
-    half3 diffuseLighting = 0;
+    // Direct assign instead of += 0
+    half3 diffuseLighting = staticLighting;
     half3 specularLighting = 0;
 
     half4 shadowCoord = TransformWorldToShadowCoord(inputData.positionWS);
     Light mainLightWithShadow = GetMainLightWithCustomRealTimeShadowIntensity(shadowCoord, inputData.positionWS, inputData.shadowMask, 1);
-    mainLightWithShadow.color *= aoFactor.directAmbientOcclusion;;
+    mainLightWithShadow.color *= aoFactor.directAmbientOcclusion;
 
-    // GI - Split into indirect diffuse and indirect specular
+    // GI - Indirect specular
     half3 reflectVector = reflect(-inputData.viewDirectionWS, inputData.normalWS);
-    // Use simplified fresnel term for environment BRDF (URP standard approach)
-    // The actual f0 value is already correctly set in brdfData.specular from diffusion profile
     half fresnelTerm = Pow4(1.0 - NoV);
     
-    // Indirect diffuse (from baked GI / light probes)
-    diffuseLighting += staticLighting;
-    
-    // Indirect specular (environment reflection)
     half3 indirectSpecular = GlossyEnvironmentReflection(reflectVector, inputData.positionWS, 
-                                                         brdfData.perceptualRoughness, 1.0h, 
+                                                         brdfDataForSSS.perceptualRoughness, 1.0h,
                                                          inputData.normalizedScreenSpaceUV);
     
-    half3 specularLightingForIce = indirectSpecular * EnvironmentBRDFSpecular(brdfData, fresnelTerm);
-    
-    //half3 specularLightingForSnow = indirectSpecular * _FourthLayerReflectionIntensity;
-    //specularLighting = lerp(specularLightingForIce, specularLightingForSnow, layer4Mask);
-    specularLighting = specularLightingForIce;
-
-    /*
-#if defined(_CLEARCOAT) || defined(_CLEARCOATMAP)
-    // Clear coat indirect specular
-    half3 coatIndirectSpecular = GlossyEnvironmentReflection(reflectVector, inputData.positionWS, 
-                                                             brdfDataClearCoat.perceptualRoughness, 1.0h,
-                                                             inputData.normalizedScreenSpaceUV);
-    half coatFresnel = kDielectricSpec.x + kDielectricSpec.a * Pow4(1.0 - NoV);
-    specularLighting = specularLighting * (1.0 - surfaceData.clearCoatMask * coatFresnel) + 
-                       coatIndirectSpecular * EnvironmentBRDFSpecular(brdfDataClearCoat, fresnelTerm) * surfaceData.clearCoatMask;
-#endif
-    */
+    specularLighting = indirectSpecular * EnvironmentBRDFSpecular(brdfDataForSSS, fresnelTerm);
 
     // Main light - Direct lighting
     half3 mainDiffuse = 0, mainSpecular = 0;
@@ -614,23 +598,18 @@ void SSSBufferFragment(
     if (IsMatchingLightLayer(mainLight.layerMask, meshRenderingLayers))
 #endif
     {
-        // === 原始 SSS 光照路径（用于非雪区域）===
         half3 sssDiffuse, sssSpecular;
-        LightingPhysicallyBasedSplit(brdfData, brdfDataClearCoat, mainLightWithShadow, mainLight,
+        LightingPhysicallyBasedSplit(brdfDataForSSS, brdfDataClearCoat, mainLightWithShadow, mainLight,
                                      inputData.normalWS, inputData.viewDirectionWS,
                                      surfaceData.clearCoatMask, specularHighlightsOff,
                                      transmittance, diffusionProfileIndex,
                                      subsurfaceMask, sssDiffuse, sssSpecular);
         
 #if defined(_USE_FOURTH_LAYER)
-        if (layer4Mask > 0.001)
+        [branch] if (layer4Mask > 0.001)
         {
-           
-            BRDFData snowBrdfData;
-            InitializeBRDFData(surfaceData, snowBrdfData);
-            
             half3 terrainDiffuse, terrainSpecular;
-            LightingPhysicallyBasedSplit_TerrainStyle(snowBrdfData, brdfDataClearCoat,
+            LightingPhysicallyBasedSplit_TerrainStyle(brdfData, brdfDataClearCoat,
                 mainLightWithShadow.color, mainLightWithShadow.direction,
                 mainLightWithShadow.distanceAttenuation * mainLightWithShadow.shadowAttenuation,
                 inputData.normalWS, inputData.viewDirectionWS,
@@ -638,17 +617,21 @@ void SSSBufferFragment(
                 surfaceData.metallic,
                 terrainDiffuse, terrainSpecular);
             
-            // 饱和度增强（与山石一致）
+            // Saturation enhancement (terrain-style)
             half nDotLForSat = saturate(dot(mainLightWithShadow.direction, inputData.normalWS));
             #if defined(LIGHTMAP_ON)
                 nDotLForSat *= inputData.shadowMask.x;
             #endif
-            half3 terrainSatColor = SceneSaturation(terrainDiffuse + terrainSpecular);
-            half3 terrainTotal = lerp(terrainDiffuse + terrainSpecular, terrainSatColor, nDotLForSat);
-            terrainDiffuse = terrainTotal * (Luminance(terrainDiffuse) / max(Luminance(terrainDiffuse + terrainSpecular), 0.001));
-            terrainSpecular = terrainTotal - terrainDiffuse;
+            half3 terrainTotal = terrainDiffuse + terrainSpecular;
+            half3 terrainSatColor = SceneSaturation(terrainTotal);
+            terrainTotal = lerp(terrainTotal, terrainSatColor, nDotLForSat);
             
-            // 按 layer4Mask 混合 SSS 路径和山石路径
+            half diffLum = Luminance(terrainDiffuse);
+            half totalLum = max(diffLum + Luminance(terrainSpecular), 0.001);
+            half diffRatio = diffLum / totalLum;
+            terrainDiffuse = terrainTotal * diffRatio;
+            terrainSpecular = terrainTotal * (1.0 - diffRatio);
+
             mainDiffuse = lerp(sssDiffuse, terrainDiffuse, layer4Mask);
             mainSpecular = lerp(sssSpecular, terrainSpecular, layer4Mask);
         }
@@ -663,22 +646,20 @@ void SSSBufferFragment(
         specularLighting += mainSpecular;
     }
 
-    // === 视线补光（与山石一致，仅雪覆盖区域）===
+    // View specular for snow-covered areas
 #if defined(_USE_FOURTH_LAYER)
-    if (layer4Mask > 0.001)
+    [branch] if (layer4Mask > 0.001)
     {
         #if defined(SOUL_VIEW_SPECULAR)
             #if defined(LIGHTMAP_OUTDOOR) || defined(LIGHTMAP_ON)
-                BRDFData snowBrdfForView;
-                InitializeBRDFData(surfaceData, snowBrdfForView);
-                
-                half3 viewLighting = ViewLightingWithBakedGIScene(snowBrdfForView.roughness,
+                // Reuse brdfData directly instead of creating new BRDFData
+                half3 viewLighting = ViewLightingWithBakedGIScene(brdfData.roughness,
                        inputData.normalWS,
                        inputData.viewDirectionWS,
                        mainLight.direction,
                        surfaceData.metallic,
                        inputData.bakedGI,
-                       snowBrdfForView.specular);
+                       brdfData.specular);
                 specularLighting += viewLighting * layer4Mask;
             #endif
         #endif
@@ -826,7 +807,7 @@ void SSSBufferFragment(
     // This buffer contains material information needed for the SSS blur pass
     // Note: thickness is NOT stored in SSS Buffer, it's read from thickness map during blur pass
     SSSData sssData;
-    sssData.diffuseColor = brdfData.diffuse;
+    sssData.diffuseColor = brdfDataForSSS.diffuse;
     sssData.subsurfaceMask = subsurfaceMask;
     sssData.diffusionProfileIndex = GetDiffusionProfileIndex(_DiffusionProfileHash);
     
