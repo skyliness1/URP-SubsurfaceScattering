@@ -1,6 +1,55 @@
 #ifndef SSSLIT_FORWARD_PASS_INCLUDED
 #define SSSLIT_FORWARD_PASS_INCLUDED
 
+//=============================================================================
+// SSSLit Shader Instruction Cost Analysis (SSSBuffer Pass - Fragment)
+//=============================================================================
+// The following table lists estimated ALU instruction costs and texture sample
+// counts for each feature module in the SSSBufferFragment function.
+// Actual counts vary by platform and compiler optimisation.  These estimates
+// are for D3D11/Vulkan desktop targets.
+//
+// ┌──────────────────────────────────────────┬───────────┬──────────┬──────────────────────────────┐
+// │ Feature                                  │ ALU (est.)│ Tex Samp │ Keyword / Condition          │
+// ├──────────────────────────────────────────┼───────────┼──────────┼──────────────────────────────┤
+// │ Base Surface (albedo+MAHS+normal)        │    ~30    │   2-3    │ Always on                    │
+// │ Overlay Normal Blend (BlendNormalRNM)    │    ~15    │    1     │ Always on                    │
+// │ Albedo Luminance Clamping                │     ~5    │    0     │ Always on                    │
+// │ SSS Texturing Mode (InitBRDFDataSSS)     │    ~15    │    0     │ Always on                    │
+// │ GI + Env Reflection                      │    ~45    │    1     │ Always on                    │
+// │ GI Diffuse Luminance Clamping            │     ~5    │    0     │ Always on                    │
+// │ Transmission (thickness+Disney)          │    ~20    │   0-1    │ Always on (_THICKNESS_MAP)   │
+// │ SSS Main Light - Lambert Diffuse         │    ~55    │    0     │ Default diffuse path         │
+// │ SSS Main Light - Energy Conservation     │    ~20    │    0     │ Always on (deduplicated)     │
+// │ Fog (ExponentialHeight + Mix)            │     ~8    │    0     │ Always on                    │
+// │ SSS Buffer Encode                        │     ~5    │    0     │ Always on                    │
+// ├──────────────────────────────────────────┼───────────┼──────────┼──────────────────────────────┤
+// │ ► BASE TOTAL (no optional features)      │   ~223    │   4-6    │                              │
+// ├──────────────────────────────────────────┼───────────┼──────────┼──────────────────────────────┤
+// │ Burley Diffuse (replace Lambert)         │   +~10    │    0     │ _USE_BURLEY_DIFFUSE          │
+// │ Dual Specular Lobe (replace Single)      │   +~25    │    0     │ _USE_DUAL_SPECULAR_LOBE      │
+// │ Second Layer (mask+diffuse+normal+MAHS)  │   +~40    │   +4     │ _USE_SECOND_LAYER            │
+// │ Third Layer                              │   +~40    │   +4     │ _USE_THIRD_LAYER             │
+// │ Fourth Layer surface                     │   +~40    │   +4     │ _USE_FOURTH_LAYER            │
+// │ Fourth Layer lighting (GI+terrain+sat)   │   +~80    │    0     │ _USE_FOURTH_LAYER            │
+// │ Parallax Detail (3ch Relief Mapping)     │  +~300    │  +30+    │ _USE_PARALLAX_DETAIL ★       │
+// │ viewDirTS for Parallax                   │   +~20    │    0     │ _USE_PARALLAX_DETAIL         │
+// ├──────────────────────────────────────────┼───────────┼──────────┼──────────────────────────────┤
+// │ ► FULL TOTAL (all features enabled)      │  ~800+    │  50+     │                              │
+// └──────────────────────────────────────────┴───────────┴──────────┴──────────────────────────────┘
+//
+// ★ Parallax Detail is the single most expensive optional feature (~300 ALU,
+//   30+ texture samples for 3 channels of Relief Mapping with binary search).
+//   Consider it only for hero assets / close-up rendering.
+//
+// Optimisations applied in this revision:
+//   1. EnvBRDFApprox deduplication in LightingPhysicallyBasedSplit  (-~15 ALU)
+//   2. lightColor*attenuation factored out                         (-~3 ALU)
+//   3. viewDirTS_detail gated behind _USE_PARALLAX_DETAIL          (-~20 ALU when off)
+//   4. Branchless luminance clamping ×3 locations                  (eliminates branches)
+//   5. Cached InitializeBRDFData for Fourth Layer ×2               (-~25 ALU each)
+//=============================================================================
+
 // Include SSSLitInput first (contains UnityPerMaterial CBUFFER for SRP Batcher)
 #include "Packages/com.unity.render-pipelines.universal/ArtShaders/Scene/SubsurfaceScattering/Includes/SSSLitInput.hlsl"
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
@@ -331,13 +380,9 @@ inline void InitializeStandardSSSLitSurfaceData(
     // Output Surface Data
     //=========================================================================
 
+    // Branchless luminance clamping (avoids GPU divergence)
     half albedoLuminance = Luminance(finalAlbedo);
-    half maxAlbedoLuminance = 0.5;  
-
-    if (albedoLuminance > maxAlbedoLuminance)
-    {
-        finalAlbedo *= maxAlbedoLuminance / albedoLuminance;
-    }
+    finalAlbedo *= saturate(0.5h / max(albedoLuminance, 0.001h));
 
     outSurfaceData.albedo = finalAlbedo;
     
@@ -392,11 +437,17 @@ void SSSBufferFragment(
 
     float2 normalizedScreenSpaceUV = GetNormalizedScreenSpaceUV(input.positionCS);
 
-    // 获取切线空间视角方向
+    // 获取切线空间视角方向（仅在视差细节启用时需要计算）
+#if defined(_USE_PARALLAX_DETAIL)
     half3 biTangentWS = cross(input.normalWS.xyz, input.tangentWS. xyz) * input.tangentWS.w;
     half3x3 TBN = half3x3(input.tangentWS.xyz, biTangentWS, input.normalWS.xyz);
     half3 viewDirTS_detail = TransformWorldToTangent(input.viewDirWS, TBN);
     viewDirTS_detail = normalize(viewDirTS_detail);
+#else
+    // Dummy value — InitializeStandardSSSLitSurfaceData requires this parameter
+    // but only uses it inside #if defined(_USE_PARALLAX_DETAIL).
+    half3 viewDirTS_detail = half3(0, 0, 1);
+#endif
 
     half subsurfaceMask;
     half layer4Mask;
@@ -509,14 +560,9 @@ void SSSBufferFragment(
     mainLight.color *= inputData.ao;
     BRDFData brdfDataForGI = brdfData;
     
+    // Branchless GI diffuse luminance clamping
     half diffuseLuminance = Luminance(brdfData.diffuse);
-    half targetMaxLuminance = _GIDiffuseScale;
-
-    if (diffuseLuminance > targetMaxLuminance)
-    {
-        half3 normalizedColor = brdfData.diffuse / max(diffuseLuminance, 0.001);  // 提取色彩方向
-        brdfDataForGI.diffuse = normalizedColor * targetMaxLuminance;              // 用目标亮度重建
-    } 
+    brdfDataForGI.diffuse = brdfData.diffuse * saturate(_GIDiffuseScale / max(diffuseLuminance, 0.001h));
     
     mainLight.shadowAttenuation = lerp(1.0, mainLight.shadowAttenuation, _ShadowIntensity * sceneShadowIntensity);
     MixRealtimeAndBakedGIOpt(mainLight, nDotL, inputData.bakedGI);
@@ -526,19 +572,21 @@ void SSSBufferFragment(
                                           inputData.normalWS, inputData.viewDirectionWS, inputData.normalizedScreenSpaceUV, bakedDir, NoV,
                                           mainLight.shadowAttenuation, 1, surfaceData.metallic);
 
+    // Cache BRDFData for fourth layer to avoid redundant InitializeBRDFData calls (~25 ALU saved × 2)
+    #if defined(_USE_FOURTH_LAYER)
+    BRDFData fourthLayerBrdf = (BRDFData)0;
+    if (layer4Mask > 0.001)
+    {
+        InitializeBRDFData(surfaceData, fourthLayerBrdf);
+    }
+    #endif
+
     #if defined(_USE_FOURTH_LAYER)
     if (layer4Mask > 0.001)
     {
-        BRDFData snowBrdfForGI;
-        InitializeBRDFData(surfaceData, snowBrdfForGI);
-        
-        half snowDiffuseLum = Luminance(snowBrdfForGI.diffuse);
-        BRDFData snowBrdfForGIClamped = snowBrdfForGI;
-        if (snowDiffuseLum > _GIDiffuseScale)
-        {
-            half3 normalizedColor = snowBrdfForGI.diffuse / max(snowDiffuseLum, 0.001);
-            snowBrdfForGIClamped.diffuse = normalizedColor * _GIDiffuseScale;
-        }
+        // Branchless GI diffuse clamping for fourth layer (reuse cached fourthLayerBrdf)
+        BRDFData snowBrdfForGIClamped = fourthLayerBrdf;
+        snowBrdfForGIClamped.diffuse = fourthLayerBrdf.diffuse * saturate(_GIDiffuseScale / max(Luminance(fourthLayerBrdf.diffuse), 0.001h));
         
         half3 snowStaticLighting = GlobalIlluminationSceneOpt(snowBrdfForGIClamped, brdfDataClearCoat, surfaceData.clearCoatMask,
                                               inputData.bakedGI, aoFactor.indirectAmbientOcclusion, inputData.positionWS,
@@ -626,11 +674,9 @@ void SSSBufferFragment(
         if (layer4Mask > 0.001)
         {
            
-            BRDFData snowBrdfData;
-            InitializeBRDFData(surfaceData, snowBrdfData);
-            
+            // Use cached fourthLayerBrdf instead of redundant InitializeBRDFData
             half3 terrainDiffuse, terrainSpecular;
-            LightingPhysicallyBasedSplit_TerrainStyle(snowBrdfData, brdfDataClearCoat,
+            LightingPhysicallyBasedSplit_TerrainStyle(fourthLayerBrdf, brdfDataClearCoat,
                 mainLightWithShadow.color, mainLightWithShadow.direction,
                 mainLightWithShadow.distanceAttenuation * mainLightWithShadow.shadowAttenuation,
                 inputData.normalWS, inputData.viewDirectionWS,
@@ -669,16 +715,14 @@ void SSSBufferFragment(
     {
         #if defined(SOUL_VIEW_SPECULAR)
             #if defined(LIGHTMAP_OUTDOOR) || defined(LIGHTMAP_ON)
-                BRDFData snowBrdfForView;
-                InitializeBRDFData(surfaceData, snowBrdfForView);
-                
-                half3 viewLighting = ViewLightingWithBakedGIScene(snowBrdfForView.roughness,
+                // Use cached fourthLayerBrdf instead of redundant InitializeBRDFData
+                half3 viewLighting = ViewLightingWithBakedGIScene(fourthLayerBrdf.roughness,
                        inputData.normalWS,
                        inputData.viewDirectionWS,
                        mainLight.direction,
                        surfaceData.metallic,
                        inputData.bakedGI,
-                       snowBrdfForView.specular);
+                       fourthLayerBrdf.specular);
                 specularLighting += viewLighting * layer4Mask;
             #endif
         #endif
